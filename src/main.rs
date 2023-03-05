@@ -33,7 +33,7 @@ struct Args {
     #[arg(long)]
     no_strip_brackets: bool,
 
-    /// Don'ts render fractions as vulgar fractions
+    /// Don't render fractions as vulgar fractions
     #[arg(long)]
     no_vulgar_fracs: bool,
 
