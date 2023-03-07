@@ -28,6 +28,7 @@ impl From<Tone> for SkinTone {
 
 /// Convert asciimath in stdin to unicode in stdout
 #[derive(Debug, Clone, Parser)]
+#[command(version, about)]
 struct Args {
     /// Don't strip unnecessary parenthesis in some contexts
     #[arg(long)]
