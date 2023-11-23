@@ -582,7 +582,7 @@ impl InlineRenderer {
             (num_rows + 1) * (left_rend.len + right_rend.len) + (num_rows - 1) * (num_cols - 1);
         for row in matrix.rows() {
             let mut rends = Vec::with_capacity(row.len());
-            for expr in row.iter() {
+            for expr in row {
                 let rend = self.render_expression(expr);
                 len += rend.len;
                 rends.push(rend.iter);
