@@ -1039,7 +1039,7 @@ impl InlineRenderer {
 #[derive(Debug, Clone)]
 pub struct RenderedUnicode<'a>(ExpressionIter<'a>);
 
-impl<'a> Iterator for RenderedUnicode<'a> {
+impl Iterator for RenderedUnicode<'_> {
     type Item = char;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -1047,9 +1047,9 @@ impl<'a> Iterator for RenderedUnicode<'a> {
     }
 }
 
-impl<'a> FusedIterator for RenderedUnicode<'a> {}
+impl FusedIterator for RenderedUnicode<'_> {}
 
-impl<'a> RenderedUnicode<'a> {
+impl RenderedUnicode<'_> {
     /// Write out, consuming self in the process
     ///
     /// This avoids the clone necessary when formatting.
@@ -1065,7 +1065,7 @@ impl<'a> RenderedUnicode<'a> {
     }
 }
 
-impl<'a> fmt::Display for RenderedUnicode<'a> {
+impl fmt::Display for RenderedUnicode<'_> {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
         for chr in self.clone() {
             write!(out, "{chr}")?;

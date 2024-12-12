@@ -643,7 +643,7 @@ mod tests {
     fn fonts() {
         let mut chars: HashSet<char> = ('A'..='Z')
             .chain('a'..='z')
-            .chain('0'..'9')
+            .chain('0'..='9')
             .chain('Α'..='Ω')
             .chain('α'..='ω')
             .chain(['∂', 'ϵ', 'ϑ', 'ϰ', 'ϕ', 'ϱ', 'ϖ', '∇'])
