@@ -7,9 +7,9 @@ Asciimath Unicode
 
 Render asciimath to unicode.
 
-To convert asciimath quickly, you can use the `write_unicode` or
-`convert_unicode` methods.  If you want more control, see the options exposed
-through `InlineRenderer` which can be rendered into `RenderedUnicode`.
+To convert asciimath quickly, you can use `parse_unicode` to get an `Asciimath`
+value that implements `Display`.  If you want more control, see the options
+exposed through `Conf` which can `parse` input into `Asciimath` as well.
 
 # Usage
 
@@ -28,20 +28,20 @@ asciimath-unicode -h
 ## Library
 
 ```bash
-cargo add asciimath-parser
+cargo add asciimath-unicode
 ```
 
 ```rs
-let res = asciimath_unicode::convert_unicode("1/2");
+let res = asciimath_unicode::parse_unicode("1/2").to_string();
 assert_eq!(res, "½");
 ```
 
 ```rs
-use asciimath_unicode::InlineRenderer;
-let renderer = InlineRenderer {
+use asciimath_unicode::Conf;
+let conf = Conf {
     vulgar_fracs: false,
     ..Default::default()
 };
-let res: String = renderer.render("1/2").collect();
+let res = conf.parse("1/2").to_string();
 assert_eq!(res, "¹⁄₂");
 ```

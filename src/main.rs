@@ -1,4 +1,4 @@
-use asciimath_unicode::{InlineRenderer, SkinTone};
+use asciimath_unicode::{Conf, SkinTone};
 use clap::{Parser, ValueEnum};
 use std::io;
 use std::io::{Read, Write};
@@ -47,9 +47,9 @@ struct Args {
     skin_tone: Tone,
 }
 
-impl From<Args> for InlineRenderer {
+impl From<Args> for Conf {
     fn from(inp: Args) -> Self {
-        InlineRenderer {
+        Conf {
             strip_brackets: !inp.no_strip_brackets,
             vulgar_fracs: !inp.no_vulgar_fracs,
             script_fracs: !inp.no_script_fracs,
@@ -59,10 +59,11 @@ impl From<Args> for InlineRenderer {
 }
 
 fn main() {
-    let renderer: InlineRenderer = Args::parse().into();
+    let conf: Conf = Args::parse().into();
     let mut inp = String::new();
     io::stdin().lock().read_to_string(&mut inp).unwrap();
     let mut out = io::stdout().lock();
-    renderer.render(&inp).into_write(&mut out).unwrap();
+    let parsed = conf.parse(&inp);
+    write!(out, "{parsed}").unwrap();
     writeln!(out).unwrap();
 }

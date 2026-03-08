@@ -2,15 +2,15 @@
 
 extern crate test;
 
-use lazy_static::lazy_static;
-use rand::distributions::Alphanumeric;
-use rand::Rng;
+use rand::RngExt;
+use rand::distr::Alphanumeric;
 use std::collections::HashMap;
 use std::hint;
+use std::sync::LazyLock;
 use test::Bencher;
 
-lazy_static! {
-    static ref SUBS: HashMap<char, char> = HashMap::from_iter([
+static SUBS: LazyLock<HashMap<char, char>> = LazyLock::new(|| {
+    HashMap::from_iter([
         ('a', 'ₐ'),
         ('e', 'ₑ'),
         ('h', 'ₕ'),
@@ -48,8 +48,8 @@ lazy_static! {
         ('φ', 'ᵩ'),
         ('ϕ', 'ᵩ'),
         ('χ', 'ᵪ'),
-    ]);
-}
+    ])
+});
 
 fn convert_hash(inp: char) -> Option<char> {
     SUBS.get(&inp).copied()
@@ -98,12 +98,10 @@ fn convert_match(inp: char) -> Option<char> {
     }
 }
 
-lazy_static! {
-    static ref RANDOM: String = {
-        let mut rng = rand::thread_rng();
-        String::from_utf8((0..1000).map(move |_| rng.sample(Alphanumeric)).collect()).unwrap()
-    };
-}
+static RANDOM: LazyLock<String> = LazyLock::new(|| {
+    let mut rng = rand::rng();
+    String::from_utf8((0..1000).map(move |_| rng.sample(Alphanumeric)).collect()).unwrap()
+});
 
 #[bench]
 fn hasher(bench: &mut Bencher) {

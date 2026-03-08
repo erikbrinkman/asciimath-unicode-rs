@@ -1,8 +1,8 @@
 //! A module for converting asciimath to unicode
 //!
-//! To convert asciimath quickly, you can use the [`write_unicode`] or [`convert_unicode`] methods.
-//! If you want more control, see the options exposed through [`InlineRenderer`] which can be
-//! [rendered][InlineRenderer::render] into [`RenderedUnicode`].
+//! To convert asciimath quickly, you can use [`parse_unicode`] to get an [`Asciimath`] value that
+//! implements [`Display`]. If you want more control, see the options exposed through [`Conf`]
+//! which can [`parse`][Conf::parse] input into [`Asciimath`] as well.
 //!
 //! # Usage
 //!
@@ -21,148 +21,193 @@
 //! ## Library
 //!
 //! ```bash
-//! cargo add asciimath-parser
+//! cargo add asciimath-unicode
 //! ```
 //!
 //! ```
-//! let res = asciimath_unicode::convert_unicode("1/2");
+//! let res = asciimath_unicode::parse_unicode("1/2").to_string();
 //! assert_eq!(res, "½");
 //! ```
 //!
 //! ```
-//! use asciimath_unicode::InlineRenderer;
-//! let renderer = InlineRenderer {
+//! use asciimath_unicode::Conf;
+//! let conf = Conf {
 //!     vulgar_fracs: false,
 //!     ..Default::default()
 //! };
-//! let res: String = renderer.render("1/2").collect();
+//! let res = conf.parse("1/2").to_string();
 //! assert_eq!(res, "¹⁄₂");
 //! ```
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic, missing_docs)]
 
-mod iter;
-mod render_chars;
 mod tokens;
 
+use asciimath_parser::Tokenizer;
 use asciimath_parser::tree::{
     Expression, Frac, Func, Group, Intermediate, Matrix, Script, ScriptFunc, Simple, SimpleBinary,
     SimpleFunc, SimpleScript, SimpleUnary,
 };
-use asciimath_parser::Tokenizer;
 pub use emojis::SkinTone;
-use iter::{Interleave, Modified};
-use render_chars::{enum_iter, struct_iter, RenderChars};
-use std::array;
 use std::fmt;
-use std::io;
-use std::io::Write;
-use std::iter::{Chain, Flatten, FusedIterator, Map};
-use std::str::Chars;
-use std::vec;
+use std::fmt::Write;
 use tokens::{
-    bold_map, cal_map, double_map, frak_map, italic_map, left_bracket_str, mono_map,
-    right_bracket_str, sans_map, subscript_char, superscript_char, symbol_str, TOKEN_MAP,
+    TOKEN_MAP, bold_map, cal_map, double_map, frak_map, italic_map, left_bracket_str, mono_map,
+    right_bracket_str, sans_map, subscript_char, superscript_char, symbol_str,
 };
+use unicode_normalization::char::compose;
 
-type CharIter = array::IntoIter<char, 1>;
+#[derive(Debug)]
+struct Sink;
 
-type GenericBinaryIter<'a> = Chain<
-    Chain<Chain<Chain<Chars<'a>, CharIter>, Box<SimpleIter<'a>>>, CharIter>,
-    Box<SimpleIter<'a>>,
->;
-
-type CharMap<I> = Map<I, fn(char) -> char>;
-
-type Delim<'a, I> = Chain<Chain<Chars<'a>, I>, Chars<'a>>;
-
-type SimpleFuncIter<'a> = Chain<Chain<Chars<'a>, CharIter>, Box<SimpleIter<'a>>>;
-
-type GroupIter<'a> = Delim<'a, Box<ExpressionIter<'a>>>;
-
-type SimpleScriptIter<'a> = Chain<SimpleIter<'a>, ScriptIter<'a>>;
-
-type FuncIter<'a> =
-    Chain<Chain<Chain<Chars<'a>, ScriptIter<'a>>, CharIter>, Box<ScriptFuncIter<'a>>>;
-
-type ExpressionIter<'a> = Flatten<vec::IntoIter<IntermediateIter<'a>>>;
-
-type MatIter<'a> = Delim<'a, Box<Interleave<Delim<'a, Interleave<ExpressionIter<'a>>>>>>;
-
-struct_iter! { SimpMappedIter : CharMap<SimpleIter<'a>> }
-
-struct_iter! { FuncMappedIter : CharMap<ScriptFuncIter<'a>> }
-
-struct_iter! { ExprMappedIter : CharMap<ExpressionIter<'a>> }
-
-enum_iter! { SimpleUnaryIter :
-    Simple => Chain<CharIter, Box<SimpleIter<'a>>>,
-    Font => Box<CharMap<SimpleIter<'a>>>,
-    StrippedFont => Box<CharMap<ExpressionIter<'a>>>,
-    Wrapped => Delim<'a, Box<SimpleIter<'a>>>,
-    StrippedWrapped => Delim<'a, Box<ExpressionIter<'a>>>,
-    Single => Chain<Box<SimpleIter<'a>>, CharIter>,
-    StrippedSingle => Chain<Box<ExpressionIter<'a>>, CharIter>,
-    Moded => Box<Modified<SimpleIter<'a>>>,
-    StrippedModed => Box<Modified<ExpressionIter<'a>>>,
-    Generic => Chain<Chain<Chars<'a>, CharIter>, Box<SimpleIter<'a>>>,
+impl fmt::Write for Sink {
+    fn write_str(&mut self, _: &str) -> fmt::Result {
+        Ok(())
+    }
 }
 
-enum_iter! { SimpleFracIter :
-    Vulgar => CharIter,
-    VulgOne => Chain<CharIter, SimpMappedIter<'a>>,
-    StrippedVulgOne => Chain<CharIter, Box<ExprMappedIter<'a>>>,
-    StrippedScript => Box<Chain<Chain<ExprMappedIter<'a>, CharIter>, ExprMappedIter<'a>>>,
-    DenomStrippedScript => Chain<Chain<SimpMappedIter<'a>, CharIter>, Box<ExprMappedIter<'a>>>,
-    NumerStrippedScript => Chain<Chain<Box<ExprMappedIter<'a>>, CharIter>, SimpMappedIter<'a>>,
-    Script => Chain<Chain<SimpMappedIter<'a>, CharIter>, SimpMappedIter<'a>>,
-    Simple => Chain<Chain<SimpleIter<'a>, CharIter>, SimpleIter<'a>>,
+#[derive(Debug, Default, Clone, Copy)]
+struct MapperConf {
+    font: Option<fn(char) -> char>,
+    sub_sup: Option<fn(char) -> Option<char>>,
+    modifier: Option<char>,
 }
 
-enum_iter! { SimpleBinaryIter :
-    Simple => Chain<CharIter, Box<SimpleIter<'a>>>,
-    ExprComb => Chain<Box<ExpressionIter<'a>>, CharIter>,
-    Comb => Chain<Box<SimpleIter<'a>>, CharIter>,
-    Char => CharIter,
-    Frac => Box<SimpleFracIter<'a>>,
-    Generic => GenericBinaryIter<'a>,
+impl MapperConf {
+    /// This method allows checking if we can apply `sub_sup` without borrowing the inner writer
+    fn with_sub_sup(&self, sub_sup: fn(char) -> Option<char>) -> Option<MapperConf> {
+        if self.sub_sup.is_none() {
+            Some(MapperConf {
+                font: self.font,
+                sub_sup: Some(sub_sup),
+                modifier: self.modifier,
+            })
+        } else {
+            None
+        }
+    }
+
+    fn with_sub(&self) -> Option<MapperConf> {
+        self.with_sub_sup(subscript_char)
+    }
+
+    fn with_sup(&self) -> Option<MapperConf> {
+        self.with_sub_sup(superscript_char)
+    }
+
+    fn wrap<S: Write>(self, other: &mut S) -> Mapper<'_, S> {
+        Mapper {
+            inner: other,
+            conf: self,
+        }
+    }
 }
 
-enum_iter! { SimpleIter :
-    Chars => Chars<'a>,
-    Func => SimpleFuncIter<'a>,
-    Unary => SimpleUnaryIter<'a>,
-    Binary => SimpleBinaryIter<'a>,
-    Group => GroupIter<'a>,
-    Matrix => MatIter<'a>,
+#[derive(Debug)]
+struct Mapper<'a, W: ?Sized> {
+    inner: &'a mut W,
+    conf: MapperConf,
 }
 
-enum_iter! { ScriptIter :
-    Empty => Chars<'static>,
-    Untouched => Chain<CharIter, SimpleIter<'a>>,
-    Mapped => CharMap<SimpleIter<'a>>,
-    SubsupUntouched => Chain<Chain<Chain<CharIter, SimpleIter<'a>>, CharIter>, SimpleIter<'a>>,
-    SubsupMapped => Chain<SimpMappedIter<'a>, SimpMappedIter<'a>>,
+impl<'a, W: fmt::Write + ?Sized> Mapper<'a, W> {
+    fn new(inner: &'a mut W) -> Self {
+        Mapper {
+            inner,
+            conf: MapperConf::default(),
+        }
+    }
+
+    fn with_font(&mut self, f: fn(char) -> char) -> Mapper<'_, W> {
+        Mapper {
+            inner: &mut *self.inner,
+            conf: MapperConf {
+                font: Some(f),
+                sub_sup: self.conf.sub_sup,
+                modifier: self.conf.modifier,
+            },
+        }
+    }
+
+    fn with_modifier(&mut self, c: char) -> Mapper<'_, W> {
+        Mapper {
+            inner: &mut *self.inner,
+            conf: MapperConf {
+                font: self.conf.font,
+                sub_sup: self.conf.sub_sup,
+                modifier: Some(c),
+            },
+        }
+    }
+
+    fn onto<'b, S: Write>(&self, other: &'b mut S) -> Mapper<'b, S> {
+        Mapper {
+            inner: other,
+            conf: self.conf,
+        }
+    }
 }
 
-enum_iter! { ScriptFuncIter :
-    Simple => SimpleScriptIter<'a>,
-    Func => FuncIter<'a>,
+impl<W: fmt::Write + ?Sized> fmt::Write for Mapper<'_, W> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        if self.conf.font.is_none() && self.conf.sub_sup.is_none() && self.conf.modifier.is_none() {
+            self.inner.write_str(s)
+        } else {
+            for mut c in s.chars() {
+                if let Some(script) = self.conf.sub_sup {
+                    c = script(c).ok_or(fmt::Error)?;
+                }
+                if let Some(font) = self.conf.font {
+                    c = font(c);
+                }
+                self.inner.write_char(c)?;
+                if let Some(modifier) = self.conf.modifier {
+                    self.inner.write_char(modifier)?;
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
-enum_iter! { FracIter :
-    Simple => SimpleFracIter<'a>,
-    NumerStrippedScript => Chain<Chain<Box<ExprMappedIter<'a>>, CharIter>, FuncMappedIter<'a>>,
-    DenomStrippedScript => Chain<Chain<FuncMappedIter<'a>, CharIter>, Box<ExprMappedIter<'a>>>,
-    Script => Chain<Chain<FuncMappedIter<'a>, CharIter>, FuncMappedIter<'a>>,
-    VulgOne => Chain<CharIter, FuncMappedIter<'a>>,
-    One => Chain<Chars<'static>, ScriptFuncIter<'a>>,
-    Func => Chain<Chain<ScriptFuncIter<'a>, CharIter>, ScriptFuncIter<'a>>,
+#[derive(Debug, Default)]
+struct SingleChar(Option<char>);
+
+impl fmt::Write for SingleChar {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        for char in s.chars() {
+            if self.0.is_none() {
+                self.0 = Some(char);
+            } else {
+                return Err(fmt::Error);
+            }
+        }
+        Ok(())
+    }
 }
 
-enum_iter! { IntermediateIter :
-    ScriptFunc => ScriptFuncIter<'a>,
-    Frac => FracIter<'a>,
+#[derive(Debug, Default)]
+struct SmallBuf {
+    buf: [u8; 4],
+    len: usize,
+}
+
+impl SmallBuf {
+    fn as_str(&self) -> Option<&str> {
+        std::str::from_utf8(&self.buf[..self.len]).ok()
+    }
+}
+
+impl fmt::Write for SmallBuf {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let bytes = s.as_bytes();
+        if self.len + bytes.len() > 4 {
+            Err(fmt::Error)
+        } else {
+            self.buf[self.len..self.len + bytes.len()].copy_from_slice(bytes);
+            self.len += bytes.len();
+            Ok(())
+        }
+    }
 }
 
 macro_rules! num {
@@ -216,34 +261,88 @@ macro_rules! xiden {
     };
 }
 
-#[inline]
-fn vulg<'a>(vulgar: char) -> RenderChars<SimpleFracIter<'a>> {
-    RenderChars::from(vulgar).map(SimpleFracIter::Vulgar)
+fn only<T>(mut iter: impl Iterator<Item = T>) -> Option<T> {
+    let first = iter.next();
+    if iter.next().is_none() { first } else { None }
 }
 
-#[inline]
-fn gsfrac<'a>(
-    num: RenderChars<SimpleIter<'a>>,
-    den: RenderChars<SimpleIter<'a>>,
-) -> RenderChars<SimpleFracIter<'a>> {
-    num.chain(RenderChars::from('/'))
-        .chain(den)
-        .map(SimpleFracIter::Simple)
+fn vulgar_frac_char(num: &str, den: &str) -> Option<char> {
+    match (num, den) {
+        ("0", "3") => Some('↉'),
+        ("1", "10") => Some('⅒'),
+        ("1", "9") => Some('⅑'),
+        ("1", "8") => Some('⅛'),
+        ("1", "7") => Some('⅐'),
+        ("1", "6") => Some('⅙'),
+        ("1", "5") => Some('⅕'),
+        ("1", "4") => Some('¼'),
+        ("1", "3") => Some('⅓'),
+        ("1", "2") => Some('½'),
+        ("2", "5") => Some('⅖'),
+        ("2", "3") => Some('⅔'),
+        ("3", "8") => Some('⅜'),
+        ("3", "5") => Some('⅗'),
+        ("3", "4") => Some('¾'),
+        ("4", "5") => Some('⅘'),
+        ("5", "8") => Some('⅝'),
+        ("5", "6") => Some('⅚'),
+        ("7", "8") => Some('⅞'),
+        ("a", "c") => Some('℀'),
+        ("a", "s") => Some('℁'),
+        ("A", "S") => Some('⅍'),
+        ("c", "o") => Some('℅'),
+        ("c", "u") => Some('℆'),
+        _ => None,
+    }
 }
 
-#[inline]
-fn gfrac<'a>(
-    num: RenderChars<ScriptFuncIter<'a>>,
-    den: RenderChars<ScriptFuncIter<'a>>,
-) -> RenderChars<FracIter<'a>> {
-    num.chain(RenderChars::from('/'))
-        .chain(den)
-        .map(FracIter::Func)
+fn extract_single_char(expr: &Expression<'_>) -> Option<char> {
+    if let [
+        Intermediate::ScriptFunc(ScriptFunc::Simple(SimpleScript {
+            simple,
+            script: Script::None,
+        })),
+    ] = &**expr
+    {
+        match simple {
+            &Simple::Ident(s) | &Simple::Number(s) => only(s.chars()),
+            _ => None,
+        }
+    } else {
+        None
+    }
 }
 
-/// An inline unicode renderer for asciimath
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InlineRenderer {
+fn extract_simple_str<'a>(simple: &Simple<'a>, strip: bool) -> Option<&'a str> {
+    match simple {
+        &Simple::Number(n) => Some(n),
+        &Simple::Ident(i) => Some(i),
+        Simple::Group(g) if strip => {
+            if let [
+                Intermediate::ScriptFunc(ScriptFunc::Simple(SimpleScript {
+                    simple,
+                    script: Script::None,
+                })),
+            ] = &*g.expr
+            {
+                extract_simple_str(simple, false)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn extract_vulgar_frac<'a>(numer: &Simple<'a>, denom: &Simple<'a>, strip: bool) -> Option<char> {
+    let num = extract_simple_str(numer, strip)?;
+    let den = extract_simple_str(denom, strip)?;
+    vulgar_frac_char(num, den)
+}
+
+/// Configuration for inline unicode rendering of asciimath
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Conf {
     /// If true, this will strip unnecessary parenthesis in some contexts
     pub strip_brackets: bool,
     /// If true, this will try to render fractions as vulgar fractions
@@ -254,9 +353,9 @@ pub struct InlineRenderer {
     pub skin_tone: SkinTone,
 }
 
-impl Default for InlineRenderer {
+impl Default for Conf {
     fn default() -> Self {
-        InlineRenderer {
+        Conf {
             strip_brackets: true,
             vulgar_fracs: true,
             script_fracs: true,
@@ -265,1061 +364,1097 @@ impl Default for InlineRenderer {
     }
 }
 
-impl InlineRenderer {
-    fn render_simplefunc<'a>(&self, simple: &SimpleFunc<'a>) -> RenderChars<SimpleFuncIter<'a>> {
-        RenderChars::from(simple.func)
-            .chain(RenderChars::from(' '))
-            .chain(self.render_simple(simple.arg()).map(Box::new))
+impl Conf {
+    fn simplefunc(self, simple: &SimpleFunc<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
+        out.write_str(simple.func)?;
+        out.write_char(' ')?;
+        self.simple(simple.arg(), out)
     }
 
-    #[inline]
-    fn render_root<'a>(
-        &self,
+    fn root(
+        self,
         root_char: char,
-        arg: &Simple<'a>,
-    ) -> RenderChars<SimpleBinaryIter<'a>> {
-        RenderChars::from(root_char)
-            .chain(self.render_simple(arg).map(Box::new))
-            .map(SimpleBinaryIter::Simple)
+        arg: &Simple<'_>,
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
+        out.write_char(root_char)?;
+        self.simple(arg, out)
     }
 
-    #[inline]
-    fn cover<'a>(
-        &self,
-        op: &'a str,
-        first: &Simple<'a>,
-        arg: &Simple<'a>,
+    fn cover(
+        self,
+        op: &str,
+        first: &Simple<'_>,
+        arg: &Simple<'_>,
         chr: char,
-    ) -> RenderChars<SimpleBinaryIter<'a>> {
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
         match arg {
             sgroup!(expr) if self.strip_brackets => {
-                let rendered = self.render_expression(expr);
-                if rendered.len == 1 {
-                    rendered
-                        .map(Box::new)
-                        .chain(RenderChars::from(chr))
-                        .map(SimpleBinaryIter::ExprComb)
+                let mut single = SingleChar::default();
+                if self.expression(expr, &mut out.onto(&mut single)).is_ok()
+                    && let Some(res) = single.0
+                {
+                    out.write_char(res)?;
+                    out.write_char(chr)
                 } else {
-                    self.render_bgeneric(op, first, arg)
+                    self.bgeneric(op, first, arg, out)
                 }
             }
             arg => {
-                let rendered = self.render_simple(arg);
-                if rendered.len == 1 {
-                    rendered
-                        .map(Box::new)
-                        .chain(RenderChars::from(chr))
-                        .map(SimpleBinaryIter::Comb)
+                let mut single = SingleChar::default();
+                if self.simple(arg, &mut out.onto(&mut single)).is_ok()
+                    && let Some(res) = single.0
+                {
+                    out.write_char(res)?;
+                    out.write_char(chr)
                 } else {
-                    self.render_bgeneric(op, first, arg)
+                    self.bgeneric(op, first, arg, out)
                 }
             }
         }
     }
 
-    #[inline]
-    fn render_equals<'a>(
-        &self,
-        iter: impl Iterator<Item = char> + Clone,
-        op: &'a str,
-        first: &Simple<'a>,
-        second: &Simple<'a>,
-    ) -> RenderChars<SimpleBinaryIter<'a>> {
-        if iter.clone().eq("∘".chars()) {
-            RenderChars::from('\u{2257}').map(SimpleBinaryIter::Char)
-        } else if iter.clone().eq("⋆".chars()) {
-            RenderChars::from('\u{225b}').map(SimpleBinaryIter::Char)
-        } else if iter.clone().eq("△".chars()) {
-            RenderChars::from('\u{225c}').map(SimpleBinaryIter::Char)
-        } else if iter.clone().eq("def".chars()) {
-            RenderChars::from('\u{225d}').map(SimpleBinaryIter::Char)
-        } else if iter.clone().eq("m".chars()) {
-            RenderChars::from('\u{225e}').map(SimpleBinaryIter::Char)
-        } else if iter.eq("?".chars()) {
-            RenderChars::from('\u{225f}').map(SimpleBinaryIter::Char)
+    fn equals(
+        self,
+        op: &str,
+        first: &Simple<'_>,
+        second: &Simple<'_>,
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
+        let mut buf = SmallBuf::default();
+        let scan = match first {
+            sgroup!(expr) if self.strip_brackets => self.expression(expr, &mut out.onto(&mut buf)),
+            f => self.simple(f, &mut out.onto(&mut buf)),
+        };
+        if scan.is_ok()
+            && let Some(s) = buf.as_str()
+            && let Some(c) = match s {
+                "∘" => Some('\u{2257}'),
+                "⋆" => Some('\u{225b}'),
+                "△" => Some('\u{225c}'),
+                "def" => Some('\u{225d}'),
+                "m" => Some('\u{225e}'),
+                "?" => Some('\u{225f}'),
+                _ => None,
+            }
+        {
+            out.write_char(c)
         } else {
-            self.render_bgeneric(op, first, second)
+            self.bgeneric(op, first, second, out)
         }
     }
 
-    #[inline]
-    fn render_bgeneric<'a>(
-        &self,
-        op: &'a str,
-        first: &Simple<'a>,
-        second: &Simple<'a>,
-    ) -> RenderChars<SimpleBinaryIter<'a>> {
-        RenderChars::from(op)
-            .chain(RenderChars::from(' '))
-            .chain(self.render_simple(first).map(Box::new))
-            .chain(RenderChars::from(' '))
-            .chain(self.render_simple(second).map(Box::new))
-            .map(SimpleBinaryIter::Generic)
+    fn bgeneric(
+        self,
+        op: &str,
+        first: &Simple<'_>,
+        second: &Simple<'_>,
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
+        out.write_str(op)?;
+        out.write_char(' ')?;
+        self.simple(first, out)?;
+        out.write_char(' ')?;
+        self.simple(second, out)
     }
 
-    fn render_simplebinary<'a>(
-        &self,
-        simple: &SimpleBinary<'a>,
-    ) -> RenderChars<SimpleBinaryIter<'a>> {
+    #[allow(clippy::too_many_lines)]
+    fn simplebinary(
+        self,
+        simple: &SimpleBinary<'_>,
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
         let sb = self.strip_brackets;
         match (simple.op, simple.first(), simple.second()) {
             // roots
-            ("root", num!("2"), arg) => self.render_root('√', arg),
-            ("root", num!("3"), arg) => self.render_root('∛', arg),
-            ("root", num!("4"), arg) => self.render_root('∜', arg),
-            ("root", sgroup!(expr), arg) if xnum!(expr, "2") => self.render_root('√', arg),
-            ("root", sgroup!(expr), arg) if xnum!(expr, "3") => self.render_root('∛', arg),
-            ("root", sgroup!(expr), arg) if xnum!(expr, "4") => self.render_root('∜', arg),
+            ("root", num!("2"), arg) => self.root('√', arg, out),
+            ("root", num!("3"), arg) => self.root('∛', arg, out),
+            ("root", num!("4"), arg) => self.root('∜', arg, out),
+            ("root", sgroup!(expr), arg) if xnum!(expr, "2") => self.root('√', arg, out),
+            ("root", sgroup!(expr), arg) if xnum!(expr, "3") => self.root('∛', arg, out),
+            ("root", sgroup!(expr), arg) if xnum!(expr, "4") => self.root('∜', arg, out),
             // frac
-            ("frac", numer, denom) => self
-                .render_simplefrac(numer, denom)
-                .map(|iter| SimpleBinaryIter::Frac(Box::new(iter))),
+            ("frac", numer, denom) => self.simplefrac(numer, denom, out),
             // stackrel / overset combining
-            (o @ ("stackrel" | "overset"), f @ iden!("a"), a) => self.cover(o, f, a, '\u{0363}'),
-            (o @ ("stackrel" | "overset"), f @ iden!("e"), a) => self.cover(o, f, a, '\u{0364}'),
-            (o @ ("stackrel" | "overset"), f @ iden!("i"), a) => self.cover(o, f, a, '\u{0365}'),
-            (o @ ("stackrel" | "overset"), f @ iden!("o"), a) => self.cover(o, f, a, '\u{0366}'),
-            (o @ ("stackrel" | "overset"), f @ iden!("u"), a) => self.cover(o, f, a, '\u{0367}'),
-            (o @ ("stackrel" | "overset"), f @ iden!("c"), a) => self.cover(o, f, a, '\u{0368}'),
-            (o @ ("stackrel" | "overset"), f @ iden!("d"), a) => self.cover(o, f, a, '\u{0369}'),
-            (o @ ("stackrel" | "overset"), f @ iden!("h"), a) => self.cover(o, f, a, '\u{036a}'),
-            (o @ ("stackrel" | "overset"), f @ iden!("m"), a) => self.cover(o, f, a, '\u{036b}'),
-            (o @ ("stackrel" | "overset"), f @ iden!("r"), a) => self.cover(o, f, a, '\u{036c}'),
-            (o @ ("stackrel" | "overset"), f @ iden!("t"), a) => self.cover(o, f, a, '\u{036d}'),
-            (o @ ("stackrel" | "overset"), f @ iden!("v"), a) => self.cover(o, f, a, '\u{036e}'),
-            (o @ ("stackrel" | "overset"), f @ iden!("x"), a) => self.cover(o, f, a, '\u{036f}'),
+            (o @ ("stackrel" | "overset"), f @ iden!("a"), a) => {
+                self.cover(o, f, a, '\u{0363}', out)
+            }
+            (o @ ("stackrel" | "overset"), f @ iden!("e"), a) => {
+                self.cover(o, f, a, '\u{0364}', out)
+            }
+            (o @ ("stackrel" | "overset"), f @ iden!("i"), a) => {
+                self.cover(o, f, a, '\u{0365}', out)
+            }
+            (o @ ("stackrel" | "overset"), f @ iden!("o"), a) => {
+                self.cover(o, f, a, '\u{0366}', out)
+            }
+            (o @ ("stackrel" | "overset"), f @ iden!("u"), a) => {
+                self.cover(o, f, a, '\u{0367}', out)
+            }
+            (o @ ("stackrel" | "overset"), f @ iden!("c"), a) => {
+                self.cover(o, f, a, '\u{0368}', out)
+            }
+            (o @ ("stackrel" | "overset"), f @ iden!("d"), a) => {
+                self.cover(o, f, a, '\u{0369}', out)
+            }
+            (o @ ("stackrel" | "overset"), f @ iden!("h"), a) => {
+                self.cover(o, f, a, '\u{036a}', out)
+            }
+            (o @ ("stackrel" | "overset"), f @ iden!("m"), a) => {
+                self.cover(o, f, a, '\u{036b}', out)
+            }
+            (o @ ("stackrel" | "overset"), f @ iden!("r"), a) => {
+                self.cover(o, f, a, '\u{036c}', out)
+            }
+            (o @ ("stackrel" | "overset"), f @ iden!("t"), a) => {
+                self.cover(o, f, a, '\u{036d}', out)
+            }
+            (o @ ("stackrel" | "overset"), f @ iden!("v"), a) => {
+                self.cover(o, f, a, '\u{036e}', out)
+            }
+            (o @ ("stackrel" | "overset"), f @ iden!("x"), a) => {
+                self.cover(o, f, a, '\u{036f}', out)
+            }
             ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "a") => {
-                self.cover(simple.op, simple.first(), arg, '\u{0363}')
+                self.cover(simple.op, simple.first(), arg, '\u{0363}', out)
             }
             ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "e") => {
-                self.cover(simple.op, simple.first(), arg, '\u{0364}')
+                self.cover(simple.op, simple.first(), arg, '\u{0364}', out)
             }
             ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "i") => {
-                self.cover(simple.op, simple.first(), arg, '\u{0365}')
+                self.cover(simple.op, simple.first(), arg, '\u{0365}', out)
             }
             ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "o") => {
-                self.cover(simple.op, simple.first(), arg, '\u{0366}')
+                self.cover(simple.op, simple.first(), arg, '\u{0366}', out)
             }
             ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "u") => {
-                self.cover(simple.op, simple.first(), arg, '\u{0367}')
+                self.cover(simple.op, simple.first(), arg, '\u{0367}', out)
             }
             ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "c") => {
-                self.cover(simple.op, simple.first(), arg, '\u{0368}')
+                self.cover(simple.op, simple.first(), arg, '\u{0368}', out)
             }
             ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "d") => {
-                self.cover(simple.op, simple.first(), arg, '\u{0369}')
+                self.cover(simple.op, simple.first(), arg, '\u{0369}', out)
             }
             ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "h") => {
-                self.cover(simple.op, simple.first(), arg, '\u{036a}')
+                self.cover(simple.op, simple.first(), arg, '\u{036a}', out)
             }
             ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "m") => {
-                self.cover(simple.op, simple.first(), arg, '\u{036b}')
+                self.cover(simple.op, simple.first(), arg, '\u{036b}', out)
             }
             ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "r") => {
-                self.cover(simple.op, simple.first(), arg, '\u{036c}')
+                self.cover(simple.op, simple.first(), arg, '\u{036c}', out)
             }
             ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "t") => {
-                self.cover(simple.op, simple.first(), arg, '\u{036d}')
+                self.cover(simple.op, simple.first(), arg, '\u{036d}', out)
             }
             ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "v") => {
-                self.cover(simple.op, simple.first(), arg, '\u{036e}')
+                self.cover(simple.op, simple.first(), arg, '\u{036e}', out)
             }
             ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "x") => {
-                self.cover(simple.op, simple.first(), arg, '\u{036f}')
+                self.cover(simple.op, simple.first(), arg, '\u{036f}', out)
             }
             // stackrel / overset equals
-            ("stackrel" | "overset", arg, symb!("=")) => match arg {
+            ("stackrel" | "overset", arg, symb!("=")) => {
+                self.equals(simple.op, arg, simple.second(), out)
+            }
+            // generic
+            (op, first, second) => self.bgeneric(op, first, second, out),
+        }
+    }
+
+    fn font(
+        self,
+        font: fn(char) -> char,
+        arg: &Simple<'_>,
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
+        let mut w = out.with_font(font);
+        match arg {
+            sgroup!(expr) if self.strip_brackets => self.expression(expr, &mut w),
+            arg => self.simple(arg, &mut w),
+        }
+    }
+
+    fn sfunc(
+        self,
+        open: &str,
+        arg: &Simple<'_>,
+        close: &str,
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
+        out.write_str(open)?;
+        match arg {
+            sgroup!(expr) if self.strip_brackets => self.expression(expr, out)?,
+            arg => self.simple(arg, out)?,
+        }
+        out.write_str(close)
+    }
+
+    fn modi(self, chr: char, arg: &Simple<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
+        let mut w = out.with_modifier(chr);
+        match arg {
+            sgroup!(expr) if self.strip_brackets => self.expression(expr, &mut w),
+            arg => self.simple(arg, &mut w),
+        }
+    }
+
+    fn char_modi(
+        self,
+        op: &str,
+        chr: char,
+        arg: &Simple<'_>,
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
+        // Try precomposition for single-char arguments (check AST, not rendered output)
+        if let Some(base) = match arg {
+            &Simple::Ident(s) | &Simple::Number(s) => only(s.chars()),
+            sgroup!(expr) if self.strip_brackets => extract_single_char(expr),
+            _ => None,
+        } && let Some(precomposed) = compose(base, chr)
+        {
+            out.write_char(precomposed)
+        } else {
+            match arg {
                 sgroup!(expr) if self.strip_brackets => {
-                    let rendered = self.render_expression(expr);
-                    self.render_equals(rendered.iter, simple.op, arg, simple.second())
+                    let mut single = SingleChar::default();
+                    if self.expression(expr, &mut out.onto(&mut single)).is_ok()
+                        && let Some(res) = single.0
+                    {
+                        out.write_char(res)?;
+                        out.write_char(chr)
+                    } else {
+                        self.ugeneric(op, arg, out)
+                    }
                 }
                 arg => {
-                    let rendered = self.render_simple(arg);
-                    self.render_equals(rendered.iter, simple.op, arg, simple.second())
-                }
-            },
-            // generic
-            (op, first, second) => self.render_bgeneric(op, first, second),
-        }
-    }
-
-    #[inline]
-    fn render_font<'a>(
-        &self,
-        font: fn(char) -> char,
-        arg: &Simple<'a>,
-    ) -> RenderChars<SimpleUnaryIter<'a>> {
-        match arg {
-            sgroup!(expr) if self.strip_brackets => self
-                .render_expression(expr)
-                .map(|iter| SimpleUnaryIter::StrippedFont(Box::new(iter.map(font)))),
-            arg => self
-                .render_simple(arg)
-                .map(|iter| SimpleUnaryIter::Font(Box::new(iter.map(font)))),
-        }
-    }
-
-    #[inline]
-    fn render_sfunc<'a>(
-        &self,
-        open: &'a str,
-        arg: &Simple<'a>,
-        close: &'a str,
-    ) -> RenderChars<SimpleUnaryIter<'a>> {
-        match arg {
-            sgroup!(expr) if self.strip_brackets => RenderChars::from(open)
-                .chain(self.render_expression(expr).map(Box::new))
-                .chain(RenderChars::from(close))
-                .map(SimpleUnaryIter::StrippedWrapped),
-            arg => RenderChars::from(open)
-                .chain(self.render_simple(arg).map(Box::new))
-                .chain(RenderChars::from(close))
-                .map(SimpleUnaryIter::Wrapped),
-        }
-    }
-
-    #[inline]
-    fn render_mod<'a>(&self, chr: char, arg: &Simple<'a>) -> RenderChars<SimpleUnaryIter<'a>> {
-        match arg {
-            sgroup!(expr) if self.strip_brackets => self
-                .render_expression(expr)
-                .map(|iter| SimpleUnaryIter::StrippedModed(Box::new(Modified::new(iter, chr)))),
-            arg => self
-                .render_simple(arg)
-                .map(|iter| SimpleUnaryIter::Moded(Box::new(Modified::new(iter, chr)))),
-        }
-    }
-
-    #[inline]
-    fn render_char_mod<'a>(
-        &self,
-        op: &'a str,
-        chr: char,
-        arg: &Simple<'a>,
-    ) -> RenderChars<SimpleUnaryIter<'a>> {
-        match arg {
-            sgroup!(expr) if self.strip_brackets => {
-                let rendered = self.render_expression(expr);
-                if rendered.len == 1 {
-                    rendered
-                        .map(Box::new)
-                        .chain(RenderChars::from(chr))
-                        .map(SimpleUnaryIter::StrippedSingle)
-                } else {
-                    self.render_ugeneric(op, arg)
-                }
-            }
-            arg => {
-                let rendered = self.render_simple(arg);
-                if rendered.len == 1 {
-                    rendered
-                        .map(Box::new)
-                        .chain(RenderChars::from(chr))
-                        .map(SimpleUnaryIter::Single)
-                } else {
-                    self.render_ugeneric(op, arg)
+                    let mut single = SingleChar::default();
+                    if self.simple(arg, &mut out.onto(&mut single)).is_ok()
+                        && let Some(res) = single.0
+                    {
+                        out.write_char(res)?;
+                        out.write_char(chr)
+                    } else {
+                        self.ugeneric(op, arg, out)
+                    }
                 }
             }
         }
     }
 
-    #[inline]
-    fn render_ugeneric<'a>(
-        &self,
-        op: &'a str,
-        arg: &Simple<'a>,
-    ) -> RenderChars<SimpleUnaryIter<'a>> {
-        RenderChars::from(op)
-            .chain(RenderChars::from(' '))
-            .chain(self.render_simple(arg).map(Box::new))
-            .map(SimpleUnaryIter::Generic)
+    fn ugeneric(
+        self,
+        op: &str,
+        arg: &Simple<'_>,
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
+        out.write_str(op)?;
+        out.write_char(' ')?;
+        self.simple(arg, out)
     }
 
     #[allow(clippy::too_many_lines)]
-    fn render_simpleunary<'a>(&self, simple: &SimpleUnary<'a>) -> RenderChars<SimpleUnaryIter<'a>> {
+    fn simpleunary(
+        self,
+        simple: &SimpleUnary<'_>,
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
         match (simple.op, simple.arg()) {
             // sqrt
-            ("sqrt", arg) => RenderChars::from('√')
-                .chain(self.render_simple(arg).map(Box::new))
-                .map(SimpleUnaryIter::Simple),
+            ("sqrt", arg) => {
+                out.write_char('√')?;
+                self.simple(arg, out)
+            }
             // fonts
-            ("bb" | "mathbf", arg) => self.render_font(bold_map, arg),
-            ("bbb" | "mathbb", arg) => self.render_font(double_map, arg),
-            ("cc" | "mathcal", arg) => self.render_font(cal_map, arg),
-            ("tt" | "mathtt", arg) => self.render_font(mono_map, arg),
-            ("fr" | "mathfrak", arg) => self.render_font(frak_map, arg),
-            ("sf" | "mathsf", arg) => self.render_font(sans_map, arg),
-            ("it" | "mathit", arg) => self.render_font(italic_map, arg),
+            ("bb" | "mathbf", arg) => self.font(bold_map, arg, out),
+            ("bbb" | "mathbb", arg) => self.font(double_map, arg, out),
+            ("cc" | "mathcal", arg) => self.font(cal_map, arg, out),
+            ("tt" | "mathtt", arg) => self.font(mono_map, arg, out),
+            ("fr" | "mathfrak", arg) => self.font(frak_map, arg, out),
+            ("sf" | "mathsf", arg) => self.font(sans_map, arg, out),
+            ("it" | "mathit", arg) => self.font(italic_map, arg, out),
             // functions
-            ("abs" | "Abs", arg) => self.render_sfunc("|", arg, "|"),
-            ("ceil", arg) => self.render_sfunc("⌈", arg, "⌉"),
-            ("floor", arg) => self.render_sfunc("⌊", arg, "⌋"),
-            ("norm", arg) => self.render_sfunc("||", arg, "||"),
-            ("text", arg) => self.render_sfunc("", arg, ""),
+            ("abs" | "Abs", arg) => self.sfunc("|", arg, "|", out),
+            ("ceil", arg) => self.sfunc("⌈", arg, "⌉", out),
+            ("floor", arg) => self.sfunc("⌊", arg, "⌋", out),
+            ("norm", arg) => self.sfunc("||", arg, "||", out),
+            ("text" | "mbox", arg) => self.sfunc("", arg, "", out),
             // modifiers
-            ("overline", arg) => self.render_mod('\u{0305}', arg),
-            ("underline" | "ul", arg) => self.render_mod('\u{0332}', arg),
+            ("overline", arg) => self.modi('\u{0305}', arg, out),
+            ("underline" | "ul", arg) => self.modi('\u{0332}', arg, out),
+            ("cancel", arg) => self.modi('\u{0336}', arg, out),
             // single character modifiers
-            (o @ "hat", arg) => self.render_char_mod(o, '\u{0302}', arg),
-            (o @ "tilde", arg) => self.render_char_mod(o, '\u{0303}', arg),
-            (o @ "bar", arg) => self.render_char_mod(o, '\u{0304}', arg),
-            (o @ "dot", arg) => self.render_char_mod(o, '\u{0307}', arg),
-            (o @ "ddot", arg) => self.render_char_mod(o, '\u{0308}', arg),
-            (o @ ("overarc" | "overparen"), arg) => self.render_char_mod(o, '\u{0311}', arg),
+            (o @ "hat", arg) => self.char_modi(o, '\u{0302}', arg, out),
+            (o @ "tilde", arg) => self.char_modi(o, '\u{0303}', arg, out),
+            (o @ "bar", arg) => self.char_modi(o, '\u{0304}', arg, out),
+            (o @ "dot", arg) => self.char_modi(o, '\u{0307}', arg, out),
+            (o @ "ddot", arg) => self.char_modi(o, '\u{0308}', arg, out),
+            (o @ ("overarc" | "overparen"), arg) => self.char_modi(o, '\u{0311}', arg, out),
+            (o @ "vec", arg) => self.char_modi(o, '\u{20D7}', arg, out),
             // generic
-            (op, arg) => self.render_ugeneric(op, arg),
+            (op, arg) => self.ugeneric(op, arg, out),
         }
     }
 
-    fn render_matrix<'a>(&self, matrix: &Matrix<'a>) -> RenderChars<MatIter<'a>> {
-        let num_cols = matrix.num_cols();
-        let num_rows = matrix.num_rows();
-        let left_rend = RenderChars::from(left_bracket_str(matrix.left_bracket));
-        let right_rend = RenderChars::from(right_bracket_str(matrix.right_bracket));
-
-        let mut rendered = Vec::with_capacity(matrix.num_rows());
-        let mut len =
-            (num_rows + 1) * (left_rend.len + right_rend.len) + (num_rows - 1) * (num_cols - 1);
-        for row in matrix.rows() {
-            let mut rends = Vec::with_capacity(row.len());
-            for expr in row {
-                let rend = self.render_expression(expr);
-                len += rend.len;
-                rends.push(rend.iter);
+    fn matrix(self, matrix: &Matrix<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
+        let left = left_bracket_str(matrix.left_bracket);
+        let right = right_bracket_str(matrix.right_bracket);
+        out.write_str(left)?;
+        for (i, row) in matrix.rows().enumerate() {
+            if i > 0 {
+                out.write_char(',')?;
             }
-            rendered.push(
-                left_rend
-                    .iter
-                    .clone()
-                    .chain(Interleave::new(rends, ','))
-                    .chain(right_rend.iter.clone()),
-            );
+            out.write_str(left)?;
+            for (j, expr) in row.iter().enumerate() {
+                if j > 0 {
+                    out.write_char(',')?;
+                }
+                self.expression(expr, out)?;
+            }
+            out.write_str(right)?;
         }
-        RenderChars {
-            iter: left_rend
-                .iter
-                .chain(Box::new(Interleave::new(rendered, ',')))
-                .chain(right_rend.iter),
-            len,
-            sub: false,
-            sup: false,
-        }
+        out.write_str(right)
     }
 
-    fn render_group<'a>(&self, group: &Group<'a>) -> RenderChars<GroupIter<'a>> {
-        RenderChars::from(left_bracket_str(group.left_bracket))
-            .chain(self.render_expression(&group.expr).map(Box::new))
-            .chain(RenderChars::from(right_bracket_str(group.right_bracket)))
+    fn group(self, group: &Group<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
+        out.write_str(left_bracket_str(group.left_bracket))?;
+        self.expression(&group.expr, out)?;
+        out.write_str(right_bracket_str(group.right_bracket))
     }
 
-    fn render_simple<'a>(&self, simple: &Simple<'a>) -> RenderChars<SimpleIter<'a>> {
+    fn simple(self, simple: &Simple<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
         match simple {
-            Simple::Missing => RenderChars::from("").map(SimpleIter::Chars),
-            &Simple::Number(num) => RenderChars::from(num).map(SimpleIter::Chars),
-            &Simple::Text(text) => RenderChars::from(text).map(SimpleIter::Chars),
-            &Simple::Ident(ident) => RenderChars::from(ident).map(SimpleIter::Chars),
-            &Simple::Symbol(symbol) => {
-                RenderChars::from(symbol_str(symbol, self.skin_tone)).map(SimpleIter::Chars)
-            }
-            Simple::Func(func) => self.render_simplefunc(func).map(SimpleIter::Func),
-            Simple::Unary(unary) => self.render_simpleunary(unary).map(SimpleIter::Unary),
-            Simple::Binary(binary) => self.render_simplebinary(binary).map(SimpleIter::Binary),
-            Simple::Group(group) => self.render_group(group).map(SimpleIter::Group),
-            Simple::Matrix(matrix) => self.render_matrix(matrix).map(SimpleIter::Matrix),
+            Simple::Missing => Ok(()),
+            &Simple::Number(num) => out.write_str(num),
+            &Simple::Text(text) => out.write_str(text),
+            &Simple::Ident(ident) => out.write_str(ident),
+            &Simple::Symbol(symbol) => out.write_str(symbol_str(symbol, self.skin_tone)),
+            Simple::Func(func) => self.simplefunc(func, out),
+            Simple::Unary(unary) => self.simpleunary(unary, out),
+            Simple::Binary(binary) => self.simplebinary(binary, out),
+            Simple::Group(group) => self.group(group, out),
+            Simple::Matrix(matrix) => self.matrix(matrix, out),
         }
     }
 
-    fn render_script<'a>(&self, script: &Script<'a>) -> RenderChars<ScriptIter<'a>> {
+    fn script(self, script: &Script<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
+        let mut sink = Sink;
         match script {
-            Script::None => RenderChars::from("").map(ScriptIter::Empty),
+            Script::None => Ok(()),
             Script::Sub(sub) => {
-                let rendered = self.render_simple(sub);
-                if rendered.sub {
-                    rendered
-                        .map(|iter| ScriptIter::Mapped(iter.map(|c| subscript_char(c).unwrap())))
+                if let Some(sconf) = out.conf.with_sub()
+                    && self.simple(sub, &mut sconf.wrap(&mut sink)).is_ok()
+                {
+                    self.simple(sub, &mut sconf.wrap(out.inner))
                 } else {
-                    RenderChars::from('_')
-                        .chain(rendered)
-                        .map(ScriptIter::Untouched)
+                    out.write_char('_')?;
+                    self.simple(sub, out)
                 }
             }
             Script::Super(sup) => {
-                let rendered = self.render_simple(sup);
-                if rendered.sup {
-                    rendered
-                        .map(|iter| ScriptIter::Mapped(iter.map(|c| superscript_char(c).unwrap())))
+                if let Some(sconf) = out.conf.with_sup()
+                    && self.simple(sup, &mut sconf.wrap(&mut sink)).is_ok()
+                {
+                    self.simple(sup, &mut sconf.wrap(out.inner))
                 } else {
-                    RenderChars::from('^')
-                        .chain(rendered)
-                        .map(ScriptIter::Untouched)
+                    out.write_char('^')?;
+                    self.simple(sup, out)
                 }
             }
-            Script::Subsuper(sub, supersc) => {
-                let rend_sub = self.render_simple(sub);
-                let rend_super = self.render_simple(supersc);
-                if rend_sub.sub && rend_super.sup {
-                    rend_sub
-                        .map(|iter| SimpMappedIter(iter.map(|c| subscript_char(c).unwrap())))
-                        .chain(
-                            rend_super.map(|iter| {
-                                SimpMappedIter(iter.map(|c| superscript_char(c).unwrap()))
-                            }),
-                        )
-                        .map(ScriptIter::SubsupMapped)
+            Script::Subsuper(sub, sup) => {
+                if let Some(sub_conf) = out.conf.with_sub()
+                    && self.simple(sub, &mut sub_conf.wrap(&mut sink)).is_ok()
+                    && let Some(sup_conf) = out.conf.with_sup()
+                    && self.simple(sup, &mut sup_conf.wrap(&mut sink)).is_ok()
+                {
+                    self.simple(sub, &mut sub_conf.wrap(out.inner))?;
+                    self.simple(sup, &mut sup_conf.wrap(out.inner))
                 } else {
-                    RenderChars::from('_')
-                        .chain(rend_sub)
-                        .chain(RenderChars::from('^'))
-                        .chain(rend_super)
-                        .map(ScriptIter::SubsupUntouched)
+                    out.write_char('_')?;
+                    self.simple(sub, out)?;
+                    out.write_char('^')?;
+                    self.simple(sup, out)
                 }
             }
         }
     }
 
-    fn render_simplescript<'a>(
-        &self,
-        simple: &SimpleScript<'a>,
-    ) -> RenderChars<SimpleScriptIter<'a>> {
-        self.render_simple(&simple.simple)
-            .chain(self.render_script(&simple.script))
+    fn simplescript(
+        self,
+        simple: &SimpleScript<'_>,
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
+        self.simple(&simple.simple, out)?;
+        self.script(&simple.script, out)
     }
 
-    fn render_func<'a>(&self, func: &Func<'a>) -> RenderChars<FuncIter<'a>> {
-        RenderChars::from(func.func)
-            .chain(self.render_script(&func.script))
-            .chain(RenderChars::from(' '))
-            .chain(self.render_scriptfunc(func.arg()).map(Box::new))
+    fn func(self, func: &Func<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
+        out.write_str(func.func)?;
+        self.script(&func.script, out)?;
+        out.write_char(' ')?;
+        self.scriptfunc(func.arg(), out)
     }
 
-    fn render_scriptfunc<'a>(&self, func: &ScriptFunc<'a>) -> RenderChars<ScriptFuncIter<'a>> {
+    fn scriptfunc(self, func: &ScriptFunc<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
         match func {
-            ScriptFunc::Simple(simple) => {
-                self.render_simplescript(simple).map(ScriptFuncIter::Simple)
-            }
-            ScriptFunc::Func(func) => self.render_func(func).map(ScriptFuncIter::Func),
+            ScriptFunc::Simple(simple) => self.simplescript(simple, out),
+            ScriptFunc::Func(func) => self.func(func, out),
         }
     }
 
-    #[inline]
-    fn render_sone<'a>(
-        &self,
-        num: &Simple<'a>,
-        den: &Simple<'a>,
-    ) -> RenderChars<SimpleFracIter<'a>> {
+    fn sone(
+        self,
+        num: &Simple<'_>,
+        den: &Simple<'_>,
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
+        let mut sink = Sink;
         match den {
             sgroup!(expr) if self.strip_brackets => {
-                let rend_den = self.render_expression(expr);
-                if rend_den.sub {
-                    RenderChars::from('⅟')
-                        .chain(rend_den.map(|iter| {
-                            Box::new(ExprMappedIter(iter.map(|c| subscript_char(c).unwrap())))
-                        }))
-                        .map(SimpleFracIter::StrippedVulgOne)
+                if let Some(sconf) = out.conf.with_sub()
+                    && self.expression(expr, &mut sconf.wrap(&mut sink)).is_ok()
+                {
+                    out.write_char('⅟')?;
+                    self.expression(expr, &mut sconf.wrap(out.inner))
                 } else {
-                    gsfrac(self.render_simple(num), self.render_simple(den))
+                    self.simple(num, out)?;
+                    out.write_char('/')?;
+                    self.simple(den, out)
                 }
             }
             den => {
-                let rend_den = self.render_simple(den);
-                if rend_den.sub {
-                    RenderChars::from('⅟')
-                        .chain(
-                            rend_den.map(|iter| {
-                                SimpMappedIter(iter.map(|c| subscript_char(c).unwrap()))
-                            }),
-                        )
-                        .map(SimpleFracIter::VulgOne)
+                if let Some(sconf) = out.conf.with_sub()
+                    && self.simple(den, &mut sconf.wrap(&mut sink)).is_ok()
+                {
+                    out.write_char('⅟')?;
+                    let mut w = sconf.wrap(out.inner);
+                    self.simple(den, &mut w)
                 } else {
-                    gsfrac(self.render_simple(num), rend_den)
+                    self.simple(num, out)?;
+                    out.write_char('/')?;
+                    self.simple(den, out)
                 }
             }
         }
     }
 
     #[allow(clippy::too_many_lines)]
-    fn render_simplefrac<'a>(
-        &self,
-        numer: &Simple<'a>,
-        denom: &Simple<'a>,
-    ) -> RenderChars<SimpleFracIter<'a>> {
+    fn simplefrac(
+        self,
+        numer: &Simple<'_>,
+        denom: &Simple<'_>,
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
+        // simple vulgar frac
+        if self.vulgar_fracs
+            && let Some(frac) = extract_vulgar_frac(numer, denom, self.strip_brackets)
+        {
+            return out.write_char(frac);
+        }
+        let mut sink = Sink;
+
         let vsf = self.vulgar_fracs && self.script_fracs;
-        let vs = self.vulgar_fracs && self.strip_brackets;
         match (numer, denom) {
-            // fracs
-            (num!("0"), num!("3")) if self.vulgar_fracs => vulg('↉'),
-            (num!("1"), num!("10")) if self.vulgar_fracs => vulg('⅒'),
-            (num!("1"), num!("9")) if self.vulgar_fracs => vulg('⅑'),
-            (num!("1"), num!("8")) if self.vulgar_fracs => vulg('⅛'),
-            (num!("1"), num!("7")) if self.vulgar_fracs => vulg('⅐'),
-            (num!("1"), num!("6")) if self.vulgar_fracs => vulg('⅙'),
-            (num!("1"), num!("5")) if self.vulgar_fracs => vulg('⅕'),
-            (num!("1"), num!("4")) if self.vulgar_fracs => vulg('¼'),
-            (num!("1"), num!("3")) if self.vulgar_fracs => vulg('⅓'),
-            (num!("1"), num!("2")) if self.vulgar_fracs => vulg('½'),
-            (num!("2"), num!("5")) if self.vulgar_fracs => vulg('⅖'),
-            (num!("2"), num!("3")) if self.vulgar_fracs => vulg('⅔'),
-            (num!("3"), num!("8")) if self.vulgar_fracs => vulg('⅜'),
-            (num!("3"), num!("5")) if self.vulgar_fracs => vulg('⅗'),
-            (num!("3"), num!("4")) if self.vulgar_fracs => vulg('¾'),
-            (num!("4"), num!("5")) if self.vulgar_fracs => vulg('⅘'),
-            (num!("5"), num!("8")) if self.vulgar_fracs => vulg('⅝'),
-            (num!("5"), num!("6")) if self.vulgar_fracs => vulg('⅚'),
-            (num!("7"), num!("8")) if self.vulgar_fracs => vulg('⅞'),
-            (sgroup!(num), num!("3")) if xnum!(num, "0") && vs => vulg('↉'),
-            (sgroup!(num), num!("10")) if xnum!(num, "1") && vs => vulg('⅒'),
-            (sgroup!(num), num!("9")) if xnum!(num, "1") && vs => vulg('⅑'),
-            (sgroup!(num), num!("8")) if xnum!(num, "1") && vs => vulg('⅛'),
-            (sgroup!(num), num!("7")) if xnum!(num, "1") && vs => vulg('⅐'),
-            (sgroup!(num), num!("6")) if xnum!(num, "1") && vs => vulg('⅙'),
-            (sgroup!(num), num!("5")) if xnum!(num, "1") && vs => vulg('⅕'),
-            (sgroup!(num), num!("4")) if xnum!(num, "1") && vs => vulg('¼'),
-            (sgroup!(num), num!("3")) if xnum!(num, "1") && vs => vulg('⅓'),
-            (sgroup!(num), num!("2")) if xnum!(num, "1") && vs => vulg('½'),
-            (sgroup!(num), num!("5")) if xnum!(num, "2") && vs => vulg('⅖'),
-            (sgroup!(num), num!("3")) if xnum!(num, "2") && vs => vulg('⅔'),
-            (sgroup!(num), num!("8")) if xnum!(num, "3") && vs => vulg('⅜'),
-            (sgroup!(num), num!("5")) if xnum!(num, "3") && vs => vulg('⅗'),
-            (sgroup!(num), num!("4")) if xnum!(num, "3") && vs => vulg('¾'),
-            (sgroup!(num), num!("5")) if xnum!(num, "4") && vs => vulg('⅘'),
-            (sgroup!(num), num!("8")) if xnum!(num, "5") && vs => vulg('⅝'),
-            (sgroup!(num), num!("6")) if xnum!(num, "5") && vs => vulg('⅚'),
-            (sgroup!(num), num!("8")) if xnum!(num, "7") && vs => vulg('⅞'),
-            (num!("0"), sgroup!(den)) if xnum!(den, "3") && vs => vulg('↉'),
-            (num!("1"), sgroup!(den)) if xnum!(den, "10") && vs => vulg('⅒'),
-            (num!("1"), sgroup!(den)) if xnum!(den, "9") && vs => vulg('⅑'),
-            (num!("1"), sgroup!(den)) if xnum!(den, "8") && vs => vulg('⅛'),
-            (num!("1"), sgroup!(den)) if xnum!(den, "7") && vs => vulg('⅐'),
-            (num!("1"), sgroup!(den)) if xnum!(den, "6") && vs => vulg('⅙'),
-            (num!("1"), sgroup!(den)) if xnum!(den, "5") && vs => vulg('⅕'),
-            (num!("1"), sgroup!(den)) if xnum!(den, "4") && vs => vulg('¼'),
-            (num!("1"), sgroup!(den)) if xnum!(den, "3") && vs => vulg('⅓'),
-            (num!("1"), sgroup!(den)) if xnum!(den, "2") && vs => vulg('½'),
-            (num!("2"), sgroup!(den)) if xnum!(den, "5") && vs => vulg('⅖'),
-            (num!("2"), sgroup!(den)) if xnum!(den, "3") && vs => vulg('⅔'),
-            (num!("3"), sgroup!(den)) if xnum!(den, "8") && vs => vulg('⅜'),
-            (num!("3"), sgroup!(den)) if xnum!(den, "5") && vs => vulg('⅗'),
-            (num!("3"), sgroup!(den)) if xnum!(den, "4") && vs => vulg('¾'),
-            (num!("4"), sgroup!(den)) if xnum!(den, "5") && vs => vulg('⅘'),
-            (num!("5"), sgroup!(den)) if xnum!(den, "8") && vs => vulg('⅝'),
-            (num!("5"), sgroup!(den)) if xnum!(den, "6") && vs => vulg('⅚'),
-            (num!("7"), sgroup!(den)) if xnum!(den, "8") && vs => vulg('⅞'),
-            (sgroup!(num), sgroup!(den)) if xnum!(num, "0") && xnum!(den, "3") && vs => vulg('↉'),
-            (sgroup!(num), sgroup!(den)) if xnum!(num, "1") && xnum!(den, "10") && vs => vulg('⅒'),
-            (sgroup!(num), sgroup!(den)) if xnum!(num, "1") && xnum!(den, "9") && vs => vulg('⅑'),
-            (sgroup!(num), sgroup!(den)) if xnum!(num, "1") && xnum!(den, "8") && vs => vulg('⅛'),
-            (sgroup!(num), sgroup!(den)) if xnum!(num, "1") && xnum!(den, "7") && vs => vulg('⅐'),
-            (sgroup!(num), sgroup!(den)) if xnum!(num, "1") && xnum!(den, "6") && vs => vulg('⅙'),
-            (sgroup!(num), sgroup!(den)) if xnum!(num, "1") && xnum!(den, "5") && vs => vulg('⅕'),
-            (sgroup!(num), sgroup!(den)) if xnum!(num, "1") && xnum!(den, "4") && vs => vulg('¼'),
-            (sgroup!(num), sgroup!(den)) if xnum!(num, "1") && xnum!(den, "3") && vs => vulg('⅓'),
-            (sgroup!(num), sgroup!(den)) if xnum!(num, "1") && xnum!(den, "2") && vs => vulg('½'),
-            (sgroup!(num), sgroup!(den)) if xnum!(num, "2") && xnum!(den, "5") && vs => vulg('⅖'),
-            (sgroup!(num), sgroup!(den)) if xnum!(num, "2") && xnum!(den, "3") && vs => vulg('⅔'),
-            (sgroup!(num), sgroup!(den)) if xnum!(num, "3") && xnum!(den, "8") && vs => vulg('⅜'),
-            (sgroup!(num), sgroup!(den)) if xnum!(num, "3") && xnum!(den, "5") && vs => vulg('⅗'),
-            (sgroup!(num), sgroup!(den)) if xnum!(num, "3") && xnum!(den, "4") && vs => vulg('¾'),
-            (sgroup!(num), sgroup!(den)) if xnum!(num, "4") && xnum!(den, "5") && vs => vulg('⅘'),
-            (sgroup!(num), sgroup!(den)) if xnum!(num, "5") && xnum!(den, "8") && vs => vulg('⅝'),
-            (sgroup!(num), sgroup!(den)) if xnum!(num, "5") && xnum!(den, "6") && vs => vulg('⅚'),
-            (sgroup!(num), sgroup!(den)) if xnum!(num, "7") && xnum!(den, "8") && vs => vulg('⅞'),
-            // frac like
-            (iden!("a"), iden!("c")) if self.vulgar_fracs => vulg('℀'),
-            (iden!("a"), iden!("s")) if self.vulgar_fracs => vulg('℁'),
-            (iden!("A"), iden!("S")) if self.vulgar_fracs => vulg('⅍'),
-            (iden!("c"), iden!("o")) if self.vulgar_fracs => vulg('℅'),
-            (iden!("c"), iden!("u")) if self.vulgar_fracs => vulg('℆'),
-            (sgroup!(num), iden!("c")) if xiden!(num, "a") && vs => vulg('℀'),
-            (sgroup!(num), iden!("s")) if xiden!(num, "a") && vs => vulg('℁'),
-            (sgroup!(num), iden!("S")) if xiden!(num, "A") && vs => vulg('⅍'),
-            (sgroup!(num), iden!("o")) if xiden!(num, "c") && vs => vulg('℅'),
-            (sgroup!(num), iden!("u")) if xiden!(num, "c") && vs => vulg('℆'),
-            (iden!("a"), sgroup!(den)) if xiden!(den, "c") && vs => vulg('℀'),
-            (iden!("a"), sgroup!(den)) if xiden!(den, "s") && vs => vulg('℁'),
-            (iden!("A"), sgroup!(den)) if xiden!(den, "S") && vs => vulg('⅍'),
-            (iden!("c"), sgroup!(den)) if xiden!(den, "o") && vs => vulg('℅'),
-            (iden!("c"), sgroup!(den)) if xiden!(den, "u") && vs => vulg('℆'),
-            (sgroup!(num), sgroup!(den)) if xiden!(num, "a") && xiden!(den, "c") && vs => vulg('℀'),
-            (sgroup!(num), sgroup!(den)) if xiden!(num, "a") && xiden!(den, "s") && vs => vulg('℁'),
-            (sgroup!(num), sgroup!(den)) if xiden!(num, "A") && xiden!(den, "S") && vs => vulg('⅍'),
-            (sgroup!(num), sgroup!(den)) if xiden!(num, "c") && xiden!(den, "o") && vs => vulg('℅'),
-            (sgroup!(num), sgroup!(den)) if xiden!(num, "c") && xiden!(den, "u") && vs => vulg('℆'),
             // one fracs
-            (num!("1"), den) if vsf => self.render_sone(numer, den),
+            (num!("1"), den) if vsf => self.sone(numer, den, out),
             (sgroup!(num), den) if vsf && self.strip_brackets && xnum!(num, "1") => {
-                self.render_sone(numer, den)
+                self.sone(numer, den, out)
             }
             // normal
             (sgroup!(num), sgroup!(den)) if self.strip_brackets && self.script_fracs => {
-                let rend_num = self.render_expression(num);
-                let rend_den = self.render_expression(den);
-                if rend_num.sup && rend_den.sub {
-                    rend_num
-                        .map(|iter| ExprMappedIter(iter.map(|c| superscript_char(c).unwrap())))
-                        .chain(RenderChars::from('⁄'))
-                        .chain(
-                            rend_den.map(|iter| {
-                                ExprMappedIter(iter.map(|c| subscript_char(c).unwrap()))
-                            }),
-                        )
-                        .map(|iter| SimpleFracIter::StrippedScript(Box::new(iter)))
+                if let Some(sup_conf) = out.conf.with_sup()
+                    && self.expression(num, &mut sup_conf.wrap(&mut sink)).is_ok()
+                    && let Some(sub_conf) = out.conf.with_sub()
+                    && self.expression(den, &mut sub_conf.wrap(&mut sink)).is_ok()
+                {
+                    self.expression(num, &mut sup_conf.wrap(out.inner))?;
+                    out.write_char('⁄')?;
+                    self.expression(den, &mut sub_conf.wrap(out.inner))
                 } else {
-                    gsfrac(self.render_simple(numer), self.render_simple(denom))
+                    self.simple(numer, out)?;
+                    out.write_char('/')?;
+                    self.simple(denom, out)
                 }
             }
             (num, sgroup!(den)) if self.strip_brackets && self.script_fracs => {
-                let rend_num = self.render_simple(num);
-                let rend_den = self.render_expression(den);
-                if rend_num.sup && rend_den.sub {
-                    rend_num
-                        .map(|iter| SimpMappedIter(iter.map(|c| superscript_char(c).unwrap())))
-                        .chain(RenderChars::from('⁄'))
-                        .chain(rend_den.map(|iter| {
-                            Box::new(ExprMappedIter(iter.map(|c| subscript_char(c).unwrap())))
-                        }))
-                        .map(SimpleFracIter::DenomStrippedScript)
+                if let Some(sup_conf) = out.conf.with_sup()
+                    && self.simple(num, &mut sup_conf.wrap(&mut sink)).is_ok()
+                    && let Some(sub_conf) = out.conf.with_sub()
+                    && self.expression(den, &mut sub_conf.wrap(&mut sink)).is_ok()
+                {
+                    self.simple(num, &mut sup_conf.wrap(out.inner))?;
+                    out.write_char('⁄')?;
+                    self.expression(den, &mut sub_conf.wrap(out.inner))
                 } else {
-                    gsfrac(rend_num, self.render_simple(denom))
+                    self.simple(num, out)?;
+                    out.write_char('/')?;
+                    self.simple(denom, out)
                 }
             }
             (sgroup!(num), den) if self.strip_brackets && self.script_fracs => {
-                let rend_num = self.render_expression(num);
-                let rend_den = self.render_simple(den);
-                if rend_num.sup && rend_den.sub {
-                    rend_num
-                        .map(|iter| {
-                            Box::new(ExprMappedIter(iter.map(|c| superscript_char(c).unwrap())))
-                        })
-                        .chain(RenderChars::from('⁄'))
-                        .chain(
-                            rend_den.map(|iter| {
-                                SimpMappedIter(iter.map(|c| subscript_char(c).unwrap()))
-                            }),
-                        )
-                        .map(SimpleFracIter::NumerStrippedScript)
+                if let Some(sup_conf) = out.conf.with_sup()
+                    && self.expression(num, &mut sup_conf.wrap(&mut sink)).is_ok()
+                    && let Some(sub_conf) = out.conf.with_sub()
+                    && self.simple(den, &mut sub_conf.wrap(&mut sink)).is_ok()
+                {
+                    self.expression(num, &mut sup_conf.wrap(out.inner))?;
+                    out.write_char('⁄')?;
+                    self.simple(den, &mut sub_conf.wrap(out.inner))
                 } else {
-                    gsfrac(self.render_simple(numer), rend_den)
+                    self.simple(numer, out)?;
+                    out.write_char('/')?;
+                    self.simple(den, out)
                 }
             }
             (num, den) => {
-                let rend_num = self.render_simple(num);
-                let rend_den = self.render_simple(den);
-                if self.script_fracs && rend_num.sup && rend_den.sub {
-                    rend_num
-                        .map(|iter| SimpMappedIter(iter.map(|c| superscript_char(c).unwrap())))
-                        .chain(RenderChars::from('⁄'))
-                        .chain(
-                            rend_den.map(|iter| {
-                                SimpMappedIter(iter.map(|c| subscript_char(c).unwrap()))
-                            }),
-                        )
-                        .map(SimpleFracIter::Script)
+                if self.script_fracs
+                    && let Some(sup_conf) = out.conf.with_sup()
+                    && self.simple(num, &mut sup_conf.wrap(&mut sink)).is_ok()
+                    && let Some(sub_conf) = out.conf.with_sub()
+                    && self.simple(den, &mut sub_conf.wrap(&mut sink)).is_ok()
+                {
+                    self.simple(num, &mut sup_conf.wrap(out.inner))?;
+                    out.write_char('⁄')?;
+                    self.simple(den, &mut sub_conf.wrap(out.inner))
                 } else {
-                    gsfrac(rend_num, rend_den)
+                    self.simple(num, out)?;
+                    out.write_char('/')?;
+                    self.simple(den, out)
                 }
             }
         }
     }
 
-    #[inline]
-    fn render_fone<'a>(&self, den: &ScriptFunc<'a>) -> RenderChars<FracIter<'a>> {
-        let rend_den = self.render_scriptfunc(den);
-        if rend_den.sub {
-            RenderChars::from('⅟')
-                .chain(
-                    rend_den.map(|iter| FuncMappedIter(iter.map(|c| subscript_char(c).unwrap()))),
-                )
-                .map(FracIter::VulgOne)
+    fn fone(self, den: &ScriptFunc<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
+        let mut sink = Sink;
+        if let Some(sconf) = out.conf.with_sub()
+            && self.scriptfunc(den, &mut sconf.wrap(&mut sink)).is_ok()
+        {
+            out.write_char('⅟')?;
+            self.scriptfunc(den, &mut sconf.wrap(out.inner))
         } else {
-            RenderChars::from("1/").chain(rend_den).map(FracIter::One)
+            out.write_str("1/")?;
+            self.scriptfunc(den, out)
         }
     }
 
     #[allow(clippy::too_many_lines)]
-    fn render_frac<'a>(&self, frac: &Frac<'a>) -> RenderChars<FracIter<'a>> {
+    fn frac(self, frac: &Frac<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
+        let mut sink = Sink;
         let sv = self.script_fracs && self.vulgar_fracs;
         match (&frac.numer, &frac.denom) {
             // simple frac
-            (script_func!(num), script_func!(den)) => {
-                self.render_simplefrac(num, den).map(FracIter::Simple)
-            }
+            (script_func!(num), script_func!(den)) => self.simplefrac(num, den, out),
             // one vulgar
-            (script_func!(num!("1")), den) if sv => self.render_fone(den),
+            (script_func!(num!("1")), den) if sv => self.fone(den, out),
             (script_func!(sgroup!(num)), den) if sv && self.strip_brackets && xnum!(num, "1") => {
-                self.render_fone(den)
+                self.fone(den, out)
             }
             // normal fractions
             (script_func!(sgroup!(num)), den) if self.strip_brackets && self.script_fracs => {
-                let rend_num = self.render_expression(num);
-                let rend_den = self.render_scriptfunc(den);
-                if rend_num.sup && rend_den.sub {
-                    rend_num
-                        .map(|iter| {
-                            Box::new(ExprMappedIter(iter.map(|c| superscript_char(c).unwrap())))
-                        })
-                        .chain(RenderChars::from('⁄'))
-                        .chain(
-                            rend_den.map(|iter| {
-                                FuncMappedIter(iter.map(|c| subscript_char(c).unwrap()))
-                            }),
-                        )
-                        .map(FracIter::NumerStrippedScript)
+                if let Some(sup_conf) = out.conf.with_sup()
+                    && self.expression(num, &mut sup_conf.wrap(&mut sink)).is_ok()
+                    && let Some(sub_conf) = out.conf.with_sub()
+                    && self.scriptfunc(den, &mut sub_conf.wrap(&mut sink)).is_ok()
+                {
+                    self.expression(num, &mut sup_conf.wrap(out.inner))?;
+                    out.write_char('⁄')?;
+                    self.scriptfunc(den, &mut sub_conf.wrap(out.inner))
                 } else {
-                    gfrac(self.render_scriptfunc(&frac.numer), rend_den)
+                    self.scriptfunc(&frac.numer, out)?;
+                    out.write_char('/')?;
+                    self.scriptfunc(den, out)
                 }
             }
             (num, script_func!(sgroup!(den))) if self.strip_brackets && self.script_fracs => {
-                let rend_num = self.render_scriptfunc(num);
-                let rend_den = self.render_expression(den);
-                if rend_num.sup && rend_den.sub {
-                    rend_num
-                        .map(|iter| FuncMappedIter(iter.map(|c| superscript_char(c).unwrap())))
-                        .chain(RenderChars::from('⁄'))
-                        .chain(rend_den.map(|iter| {
-                            Box::new(ExprMappedIter(iter.map(|c| subscript_char(c).unwrap())))
-                        }))
-                        .map(FracIter::DenomStrippedScript)
+                if let Some(sup_conf) = out.conf.with_sup()
+                    && self.scriptfunc(num, &mut sup_conf.wrap(&mut sink)).is_ok()
+                    && let Some(sub_conf) = out.conf.with_sub()
+                    && self.expression(den, &mut sub_conf.wrap(&mut sink)).is_ok()
+                {
+                    self.scriptfunc(num, &mut sup_conf.wrap(out.inner))?;
+                    out.write_char('⁄')?;
+                    self.expression(den, &mut sub_conf.wrap(out.inner))
                 } else {
-                    gfrac(rend_num, self.render_scriptfunc(&frac.denom))
+                    self.scriptfunc(num, out)?;
+                    out.write_char('/')?;
+                    self.scriptfunc(&frac.denom, out)
                 }
             }
             (num, den) => {
-                let rend_num = self.render_scriptfunc(num);
-                let rend_den = self.render_scriptfunc(den);
-                if self.script_fracs && rend_num.sup && rend_den.sub {
-                    rend_num
-                        .map(|iter| FuncMappedIter(iter.map(|c| superscript_char(c).unwrap())))
-                        .chain(RenderChars::from('⁄'))
-                        .chain(
-                            rend_den.map(|iter| {
-                                FuncMappedIter(iter.map(|c| subscript_char(c).unwrap()))
-                            }),
-                        )
-                        .map(FracIter::Script)
+                if self.script_fracs
+                    && let Some(sup_conf) = out.conf.with_sup()
+                    && self.scriptfunc(num, &mut sup_conf.wrap(&mut sink)).is_ok()
+                    && let Some(sub_conf) = out.conf.with_sub()
+                    && self.scriptfunc(den, &mut sub_conf.wrap(&mut sink)).is_ok()
+                {
+                    self.scriptfunc(num, &mut sup_conf.wrap(out.inner))?;
+                    out.write_char('⁄')?;
+                    self.scriptfunc(den, &mut sub_conf.wrap(out.inner))
                 } else {
-                    gfrac(rend_num, rend_den)
+                    self.scriptfunc(num, out)?;
+                    out.write_char('/')?;
+                    self.scriptfunc(den, out)
                 }
             }
         }
     }
 
-    fn render_intermediate<'a>(
-        &self,
-        inter: &Intermediate<'a>,
-    ) -> RenderChars<IntermediateIter<'a>> {
+    fn intermediate(
+        self,
+        inter: &Intermediate<'_>,
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
         match inter {
-            Intermediate::ScriptFunc(sf) => {
-                self.render_scriptfunc(sf).map(IntermediateIter::ScriptFunc)
-            }
-            Intermediate::Frac(frac) => self.render_frac(frac).map(IntermediateIter::Frac),
+            Intermediate::ScriptFunc(sf) => self.scriptfunc(sf, out),
+            Intermediate::Frac(frac) => self.frac(frac, out),
         }
     }
 
-    fn render_expression<'a>(&self, expr: &Expression<'a>) -> RenderChars<ExpressionIter<'a>> {
-        let inters: RenderChars<_> = expr
-            .iter()
-            .map(|inter| self.render_intermediate(inter))
-            .collect();
-        inters
+    fn expression(self, expr: &Expression<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
+        for inter in expr.iter() {
+            self.intermediate(inter, out)?;
+        }
+        Ok(())
     }
 
-    /// Render an input string with the given options
+    /// Parse an asciimath string into an [`Asciimath`] value that implements [`Display`]
     #[must_use]
-    pub fn render<'a>(&self, inp: &'a str) -> RenderedUnicode<'a> {
-        let parsed = parse_unicode(inp);
-        let rendered = self.render_expression(&parsed);
-        RenderedUnicode(rendered.iter)
+    pub fn parse(self, inp: &str) -> Asciimath<'_> {
+        let expr = asciimath_parser::parse_tokens(Tokenizer::with_tokens(inp, &*TOKEN_MAP, true));
+        Asciimath { conf: self, expr }
     }
 }
 
-/// Rendered unicode
+/// Parsed asciimath expression ready for rendering
 ///
-/// This can be formatted to get a string, [consumed into a `Write`][RenderedUnicode::into_write],
-/// or iterated as `char`s.
+/// Implements [`Display`] so it can be used with `format!`, `write!`, or `.to_string()`.
 #[derive(Debug, Clone)]
-pub struct RenderedUnicode<'a>(ExpressionIter<'a>);
-
-impl Iterator for RenderedUnicode<'_> {
-    type Item = char;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.0.next()
-    }
+pub struct Asciimath<'a> {
+    conf: Conf,
+    expr: Expression<'a>,
 }
 
-impl FusedIterator for RenderedUnicode<'_> {}
+impl<'a> Asciimath<'a> {
+    /// Extract the inner asciimath expression
+    #[must_use]
+    pub fn into_inner(self) -> Expression<'a> {
+        self.expr
+    }
 
-impl RenderedUnicode<'_> {
-    /// Write out, consuming self in the process
-    ///
-    /// This avoids the clone necessary when formatting.
-    ///
-    /// # Errors
-    ///
-    /// If there are any io errors writing.
-    pub fn into_write<O: Write>(self, out: &mut O) -> io::Result<()> {
-        for chr in self {
-            write!(out, "{chr}")?;
+    /// Update the rendering configuration of this `Asciimath`
+    #[must_use]
+    pub fn with_conf(self, new_conf: Conf) -> Self {
+        Self {
+            conf: new_conf,
+            expr: self.expr,
         }
-        Ok(())
     }
 }
 
-impl fmt::Display for RenderedUnicode<'_> {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-        for chr in self.clone() {
-            write!(out, "{chr}")?;
-        }
-        Ok(())
+impl fmt::Display for Asciimath<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.conf.expression(&self.expr, &mut Mapper::new(f))
     }
 }
 
-/// Parse asciimath using the conventions of this renderer
+/// Parse asciimath into an [`Asciimath`] value that implements [`Display`]
 #[must_use]
-pub fn parse_unicode(inp: &str) -> Expression {
-    asciimath_parser::parse_tokens(Tokenizer::with_tokens(inp, &*TOKEN_MAP, true))
-}
-
-/// Convert an asciimath string into unicode and write it to the writer
-///
-/// # Errors
-///
-/// If one is thrown by the writer
-pub fn write_unicode<O: Write>(inp: &str, out: &mut O) -> io::Result<()> {
-    InlineRenderer::default().render(inp).into_write(out)
-}
-
-/// Convert an asciimath string into a unicode string
-#[must_use]
-pub fn convert_unicode(inp: &str) -> String {
-    InlineRenderer::default().render(inp).collect()
+pub fn parse_unicode(inp: &str) -> Asciimath<'_> {
+    Conf::default().parse(inp)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{InlineRenderer, SkinTone};
+    use super::{Conf, SkinTone};
 
     #[test]
     fn example() {
         let ex = "sum_(i=1)^n i^3=((n(n+1))/2)^2";
         let expected = "∑₍ᵢ₌₁₎ⁿi³=(ⁿ⁽ⁿ⁺¹⁾⁄₂)²";
 
-        let res = super::convert_unicode(ex);
+        let res = super::parse_unicode(ex).to_string();
         assert_eq!(res, expected);
 
-        let mut res = Vec::new();
-        super::write_unicode(ex, &mut res).unwrap();
-        assert_eq!(res, expected.as_bytes());
-
-        let rend = InlineRenderer::default().render(ex);
+        let rend = Conf::default().parse(ex);
         assert_eq!(format!("{rend}"), expected);
-
-        let mut res = Vec::new();
-        rend.into_write(&mut res).unwrap();
-        assert_eq!(res, expected.as_bytes());
     }
 
     #[test]
     fn vulgar_fracs() {
-        let opts = InlineRenderer {
+        let opts = Conf {
             vulgar_fracs: true,
             ..Default::default()
         };
-        let res: String = opts.render("1/2").collect();
+        let res = opts.parse("1/2").to_string();
         assert_eq!(res, "½");
 
-        let res: String = opts.render("a / s").collect();
+        let res = opts.parse("a / s").to_string();
         assert_eq!(res, "℁");
     }
 
     #[test]
     fn stripped_vulgar_fracs() {
-        let opts = InlineRenderer {
+        let opts = Conf {
             vulgar_fracs: true,
             strip_brackets: true,
             ..Default::default()
         };
-        let res: String = opts.render("(1)/2").collect();
+        let res = opts.parse("(1)/2").to_string();
         assert_eq!(res, "½");
 
-        let res: String = opts.render("7/[8]").collect();
+        let res = opts.parse("7/[8]").to_string();
         assert_eq!(res, "⅞");
 
-        let res: String = opts.render("{a} / (s)").collect();
+        let res = opts.parse("{a} / (s)").to_string();
         assert_eq!(res, "℁");
     }
 
     #[test]
     fn script_fracs() {
-        let opts = InlineRenderer {
+        let opts = Conf {
             script_fracs: true,
             strip_brackets: false,
             ..Default::default()
         };
-        let res: String = opts.render("y / x").collect();
+        let res = opts.parse("y / x").to_string();
         assert_eq!(res, "ʸ⁄ₓ");
 
-        let res: String = opts.render("(y) / x").collect();
+        let res = opts.parse("(y) / x").to_string();
         assert_eq!(res, "⁽ʸ⁾⁄ₓ");
     }
 
     #[test]
     fn stripped_script_fracs() {
-        let opts = InlineRenderer {
+        let opts = Conf {
             script_fracs: true,
             ..Default::default()
         };
 
-        let res: String = opts.render("(y) / x").collect();
+        let res = opts.parse("(y) / x").to_string();
         assert_eq!(res, "ʸ⁄ₓ");
 
-        let res: String = opts.render("y / [x]").collect();
+        let res = opts.parse("y / [x]").to_string();
         assert_eq!(res, "ʸ⁄ₓ");
 
-        let res: String = opts.render("(y)/[x]").collect();
+        let res = opts.parse("(y)/[x]").to_string();
         assert_eq!(res, "ʸ⁄ₓ");
     }
 
     #[test]
     fn one_fracs() {
-        let res = super::convert_unicode("1/x");
+        let res = super::parse_unicode("1/x").to_string();
         assert_eq!(res, "⅟ₓ");
 
-        let res = super::convert_unicode("1 / sinx");
+        let res = super::parse_unicode("1 / sinx").to_string();
         assert_eq!(res, "⅟ₛᵢₙ ₓ");
 
-        let opts = InlineRenderer {
+        let opts = Conf {
             script_fracs: false,
             vulgar_fracs: false,
             strip_brackets: false,
             ..Default::default()
         };
-        let res: String = opts.render("1 / sinx").collect();
+        let res = opts.parse("1 / sinx").to_string();
         assert_eq!(res, "1/sin x");
     }
 
     #[test]
     fn normal_fracs() {
-        let opts = InlineRenderer {
+        let opts = Conf {
             script_fracs: false,
             vulgar_fracs: false,
             strip_brackets: false,
             ..Default::default()
         };
 
-        let res: String = opts.render("sinx / cosy").collect();
+        let res = opts.parse("sinx / cosy").to_string();
         assert_eq!(res, "sin x/cos y");
     }
 
     #[test]
+    #[allow(clippy::unicode_not_nfc)]
     fn unary() {
-        let res = super::convert_unicode("sqrt x");
+        let res = super::parse_unicode("sqrt x").to_string();
         assert_eq!(res, "√x");
 
-        let res = super::convert_unicode("vec x");
-        assert_eq!(res, "vec x");
+        let res = super::parse_unicode("vec x").to_string();
+        assert_eq!(res, "x\u{20D7}");
 
-        let res = super::convert_unicode("bbb E");
+        let res = super::parse_unicode("bbb E").to_string();
         assert_eq!(res, "𝔼");
 
-        let res = super::convert_unicode("bbb (E)");
+        let res = super::parse_unicode("bbb (E)").to_string();
         assert_eq!(res, "𝔼");
 
-        let res = super::convert_unicode("dot x");
-        assert_eq!(res, "ẋ");
+        let res = super::parse_unicode("dot x").to_string();
+        assert_eq!(res, "ẋ");
 
-        let res = super::convert_unicode("dot{x}");
-        assert_eq!(res, "ẋ");
+        let res = super::parse_unicode("dot{x}").to_string();
+        assert_eq!(res, "ẋ");
 
-        let res = super::convert_unicode("norm x");
+        let res = super::parse_unicode("norm x").to_string();
         assert_eq!(res, "||x||");
 
-        let res = super::convert_unicode("sqrt overline x");
+        let res = super::parse_unicode("sqrt overline x").to_string();
         assert_eq!(res, "√x̅");
 
-        let res = super::convert_unicode("sqrt overline(x)");
+        let res = super::parse_unicode("sqrt overline(x)").to_string();
         assert_eq!(res, "√x̅");
     }
 
     #[test]
     fn binary() {
-        let res = super::convert_unicode("root 3 x");
+        let res = super::parse_unicode("root 3 x").to_string();
         assert_eq!(res, "∛x");
 
-        let res = super::convert_unicode("root {4} x");
+        let res = super::parse_unicode("root {4} x").to_string();
         assert_eq!(res, "∜x");
 
-        let res = super::convert_unicode("stackrel *** =");
+        let res = super::parse_unicode("stackrel *** =").to_string();
         assert_eq!(res, "≛");
 
-        let res = super::convert_unicode("overset a x");
+        let res = super::parse_unicode("overset a x").to_string();
         assert_eq!(res, "x\u{0363}");
 
-        let res = super::convert_unicode("overset (e) {y}");
+        let res = super::parse_unicode("overset (e) {y}").to_string();
         assert_eq!(res, "y\u{0364}");
 
-        let res = super::convert_unicode("oversetasinx");
+        let res = super::parse_unicode("oversetasinx").to_string();
         assert_eq!(res, "overset a sin x");
     }
 
     #[test]
     fn functions() {
-        let res = super::convert_unicode("sin x/x");
+        let res = super::parse_unicode("sin x/x").to_string();
         assert_eq!(res, "ˢⁱⁿ ˣ⁄ₓ");
     }
 
     #[test]
     fn script() {
-        let res = super::convert_unicode("x^sin x");
+        let res = super::parse_unicode("x^sin x").to_string();
         assert_eq!(res, "xˢⁱⁿ ˣ");
 
-        let res = super::convert_unicode("x^vec(x)");
-        assert_eq!(res, "xᵛᵉᶜ ⁽ˣ⁾");
+        let res = super::parse_unicode("x^vec(x)").to_string();
+        assert_eq!(res, "x^x\u{20D7}");
 
-        let res = super::convert_unicode("x_x^y");
+        let res = super::parse_unicode("x_x^y").to_string();
         assert_eq!(res, "xₓʸ");
 
-        let res = super::convert_unicode("x_y^sin x");
+        let res = super::parse_unicode("x_y^sin x").to_string();
         assert_eq!(res, "x_y^sin x");
 
-        let res = super::convert_unicode("x^sin rho");
+        let res = super::parse_unicode("x^sin rho").to_string();
         assert_eq!(res, "x^sin ρ");
 
-        let res = super::convert_unicode("x_x");
+        let res = super::parse_unicode("x_x").to_string();
         assert_eq!(res, "xₓ");
 
-        let res = super::convert_unicode("x_y");
+        let res = super::parse_unicode("x_y").to_string();
         assert_eq!(res, "x_y");
     }
 
     #[test]
     fn text() {
-        let res = super::convert_unicode("\"text\"");
+        let res = super::parse_unicode("\"text\"").to_string();
         assert_eq!(res, "text");
     }
 
     #[test]
     fn matrix() {
-        let opts = InlineRenderer::default();
+        let opts = Conf::default();
 
-        let res: String = opts.render("[ [x, y], [a, b] ]").collect();
+        let res = opts.parse("[ [x, y], [a, b] ]").to_string();
         assert_eq!(res, "[[x,y],[a,b]]");
     }
 
     #[test]
     fn skin_tone() {
-        let opts = InlineRenderer {
+        let opts = Conf {
             skin_tone: SkinTone::Default,
             ..Default::default()
         };
-        let res: String = opts.render(":hand:").collect();
+        let res = opts.parse(":hand:").to_string();
         assert_eq!(res, "✋");
 
-        let opts = InlineRenderer {
+        let opts = Conf {
             skin_tone: SkinTone::Dark,
             ..Default::default()
         };
-        let res: String = opts.render(":hand:").collect();
+        let res = opts.parse(":hand:").to_string();
         assert_eq!(res, "✋🏿");
+    }
+
+    #[test]
+    fn empty_input() {
+        assert_eq!(super::parse_unicode("").to_string(), "");
+    }
+
+    #[test]
+    fn gt_symbol() {
+        let res = super::parse_unicode("x > y").to_string();
+        assert_eq!(res, "x>y");
+    }
+
+    #[test]
+    fn land_lor() {
+        let res = super::parse_unicode("x land y").to_string();
+        assert_eq!(res, "x∧y");
+
+        let res = super::parse_unicode("x lor y").to_string();
+        assert_eq!(res, "x∨y");
+    }
+
+    #[test]
+    fn approx() {
+        let res = super::parse_unicode("x approx y").to_string();
+        assert_eq!(res, "x≈y");
+    }
+
+    #[test]
+    #[allow(clippy::unicode_not_nfc)]
+    fn unary_modifiers() {
+        let res = super::parse_unicode("hat x").to_string();
+        assert_eq!(res, "x̂");
+
+        let res = super::parse_unicode("tilde x").to_string();
+        assert_eq!(res, "x̃");
+
+        let res = super::parse_unicode("bar x").to_string();
+        assert_eq!(res, "x̄");
+
+        let res = super::parse_unicode("ddot x").to_string();
+        assert_eq!(res, "ẍ");
+
+        let res = super::parse_unicode("overarc x").to_string();
+        assert_eq!(res, "x̑");
+
+        let res = super::parse_unicode("overparen x").to_string();
+        assert_eq!(res, "x̑");
+
+        let res = super::parse_unicode("ul x").to_string();
+        assert_eq!(res, "x̲");
+
+        let res = super::parse_unicode("underline x").to_string();
+        assert_eq!(res, "x̲");
+
+        let res = super::parse_unicode("cancel x").to_string();
+        assert_eq!(res, "x\u{0336}");
+
+        let res = super::parse_unicode("vec x").to_string();
+        assert_eq!(res, "x\u{20D7}");
+
+        // non-precomposed: q has no precomposed dot or ddot form
+        let res = super::parse_unicode("dot q").to_string();
+        assert_eq!(res, "q\u{0307}");
+
+        let res = super::parse_unicode("ddot q").to_string();
+        assert_eq!(res, "q\u{0308}");
+
+        let res = super::parse_unicode("hat q").to_string();
+        assert_eq!(res, "q\u{0302}");
+
+        let res = super::parse_unicode("tilde q").to_string();
+        assert_eq!(res, "q\u{0303}");
+
+        let res = super::parse_unicode("bar q").to_string();
+        assert_eq!(res, "q\u{0304}");
+
+        let res = super::parse_unicode("vec q").to_string();
+        assert_eq!(res, "q\u{20D7}");
+    }
+
+    #[test]
+    fn vulgar_fraction_patterns() {
+        let opts = Conf {
+            vulgar_fracs: true,
+            ..Default::default()
+        };
+        assert_eq!(opts.parse("1/4").to_string(), "¼");
+        assert_eq!(opts.parse("1/3").to_string(), "⅓");
+        assert_eq!(opts.parse("2/3").to_string(), "⅔");
+        assert_eq!(opts.parse("1/5").to_string(), "⅕");
+        assert_eq!(opts.parse("2/5").to_string(), "⅖");
+        assert_eq!(opts.parse("3/5").to_string(), "⅗");
+        assert_eq!(opts.parse("4/5").to_string(), "⅘");
+        assert_eq!(opts.parse("1/6").to_string(), "⅙");
+        assert_eq!(opts.parse("5/6").to_string(), "⅚");
+        assert_eq!(opts.parse("1/7").to_string(), "⅐");
+        assert_eq!(opts.parse("1/8").to_string(), "⅛");
+        assert_eq!(opts.parse("3/8").to_string(), "⅜");
+        assert_eq!(opts.parse("5/8").to_string(), "⅝");
+        assert_eq!(opts.parse("7/8").to_string(), "⅞");
+        assert_eq!(opts.parse("1/9").to_string(), "⅑");
+        assert_eq!(opts.parse("1/10").to_string(), "⅒");
+        assert_eq!(opts.parse("3/4").to_string(), "¾");
+    }
+
+    #[test]
+    fn config_no_strip_no_vulgar_no_script() {
+        let opts = Conf {
+            strip_brackets: false,
+            vulgar_fracs: false,
+            script_fracs: false,
+            ..Default::default()
+        };
+        let res = opts.parse("(x)/y").to_string();
+        assert_eq!(res, "(x)/y");
+    }
+
+    #[test]
+    fn config_strip_no_vulgar_no_script() {
+        let opts = Conf {
+            strip_brackets: true,
+            vulgar_fracs: false,
+            script_fracs: false,
+            ..Default::default()
+        };
+        let res = opts.parse("(x)/y").to_string();
+        assert_eq!(res, "(x)/y");
+    }
+
+    #[test]
+    fn config_no_strip_vulgar_no_script() {
+        let opts = Conf {
+            strip_brackets: false,
+            vulgar_fracs: true,
+            script_fracs: false,
+            ..Default::default()
+        };
+        let res = opts.parse("1/2").to_string();
+        assert_eq!(res, "½");
+    }
+
+    #[test]
+    fn config_no_strip_no_vulgar_script() {
+        let opts = Conf {
+            strip_brackets: false,
+            vulgar_fracs: false,
+            script_fracs: true,
+            ..Default::default()
+        };
+        // y is not subscriptable, falls through to plain frac
+        let res = opts.parse("x/y").to_string();
+        assert_eq!(res, "x/y");
+        // x is both super/subscriptable
+        let res = opts.parse("x/x").to_string();
+        assert_eq!(res, "ˣ⁄ₓ");
+    }
+
+    #[test]
+    fn deeply_nested() {
+        let res = super::parse_unicode("((((x))))").to_string();
+        assert_eq!(res, "((((x))))");
+
+        let res = super::parse_unicode("sqrt sqrt sqrt x").to_string();
+        assert_eq!(res, "√√√x");
+    }
+
+    #[test]
+    fn non_ascii_ident() {
+        // non-ASCII characters pass through as identifiers
+        let res = super::parse_unicode("λ").to_string();
+        assert_eq!(res, "λ");
     }
 }
