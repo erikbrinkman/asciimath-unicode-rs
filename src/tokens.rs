@@ -1,10 +1,10 @@
 //! Definitions of the relevant tokens and conversions between them
 
-use asciimath_parser::prefix_map::QpTriePrefixMap;
 use asciimath_parser::Token;
+use asciimath_parser::prefix_map::QpTriePrefixMap;
 use emojis::SkinTone;
-use lazy_static::lazy_static;
 use std::borrow::Cow;
+use std::sync::LazyLock;
 
 macro_rules! tokens {
     ($($type:ident => $($str:expr),+;)+) => {
@@ -18,7 +18,7 @@ macro_rules! tokens {
     };
 }
 
-const UNICODE_TOKENS: [(&str, Token); 379] = tokens!(
+const UNICODE_TOKENS: [(&str, Token); 399] = tokens!(
     Frac => "/";
     Super => "^";
     Sub => "_";
@@ -44,27 +44,31 @@ const UNICODE_TOKENS: [(&str, Token); 379] = tokens!(
     // operations
     Symbol => "*", "cdot", "**", "ast", "***", "star", "//", "\\\\", "backslash", "setminus", "xx",
         "times", "|><", "ltimes", "><|", "rtimes", "|><|", "bowtie", "-:", "div", "divide", "@",
-        "circ", "o+", "oplus", "ox", "otimes", "o.", "odot", "sum", "prod", "^^", "wedge", "^^^",
-        "bigwedge", "vv", "vee", "vvv", "bigvee", "nn", "cap", "nnn", "bigcap", "uu", "cup", "uuu",
-        "bigcup";
+        "circ", "o+", "oplus", "ox", "otimes", "o.", "odot", "sum", "prod", "^^", "wedge", "land",
+        "^^^", "bigwedge", "vv", "vee", "lor", "vvv", "bigvee", "nn", "cap", "nnn", "bigcap", "uu",
+        "cup", "uuu", "bigcup", "ominus", "oslash";
     // relations
-    Symbol => "=", "!=", "ne", "<", "lt", "<=", "le", "lt=", "leq", "<", "gt", "mlt", "ll", ">=", "ge",
+    Symbol => "=", "!=", "ne", "<", "lt", "<=", "le", "lt=", "leq", ">", "gt", "mlt", "ll", ">=", "ge",
         "gt=", "geq", "mgt", "gg", "-<", "prec", "-lt", ">-", "succ", "-<=", "preceq", ">-=",
         "succeq", "in", "!in", "notin", "sub", "subset", "sup", "supset", "sube", "subseteq",
-        "supe", "supseteq", "-=", "equiv", "~=", "cong", "~~", "aprox", "~", "sim", "prop",
-        "propto";
+        "supe", "supseteq",
+        "!sub", "nsub", "!sup", "nsup", "!sube", "nsubseteq", "!supe", "nsupseteq",
+        "-=", "equiv", "~=", "cong", "~~", "approx", "~", "sim",
+        "prop", "propto";
     // logical
     Symbol => "not", "neg", "=>", "implies", "<=>", "iff", "AA", "forall", "EE", "exists", "!EE",
         "notexists", "_|_", "bot", "TT", "top", "|--", "vdash", "|==", "models";
     Symbol => "and", "or", "if";
     // misc
-    Symbol => ":|:", "int", "oint", "del", "partial", "grad", "nabla", "+-", "pm", "-+", "mp",
+    Symbol => ":|:", "int", "oint", "iint", "iiint", "oiint", "oiiint",
+        "del", "partial", "grad", "nabla", "+-", "pm", "-+", "mp",
         "O/", "emptyset", "oo", "infty", "aleph", "...", "ldots", ":.", "therefore", ":'",
         "because", "/_", "angle", "/_\\", "triangle", "'", "prime", "\\ ", "frown",
         "quad", "qquad", "cdots", "vdots", "ddots", "diamond", "square", "CC", "NN", "QQ", "RR",
         "ZZ", "ell";
     // arrows
-    Symbol => "uarr", "uparrow", "darr", "downarrow", "rarr", "rightarrow", "->", "to", ">->",
+    Symbol => "uarr", "uparrow", "uArr", "Uparrow", "darr", "downarrow", "dArr", "Downarrow",
+        "rarr", "rightarrow", "->", "to", ">->",
         "rightarrowtail", "->>", "twoheadrightarrow", ">->>", "twoheadrightarrowtail", "|->",
         "mapsto", "larr", "leftarrow", "<-", "harr", "leftrightarrow", "<->", "rArr", "Rightarrow",
         "==>", "lArr", "Leftarrow","<==",  "hArr", "Leftrightarrow", "<==>";
@@ -83,8 +87,8 @@ const UNICODE_TOKENS: [(&str, Token); 379] = tokens!(
     Ident => ":=";
 );
 
-lazy_static! {
-    pub static ref TOKEN_MAP: QpTriePrefixMap<Cow<'static, str>, Token> = UNICODE_TOKENS
+pub static TOKEN_MAP: LazyLock<QpTriePrefixMap<Cow<'static, str>, Token>> = LazyLock::new(|| {
+    UNICODE_TOKENS
         .into_iter()
         .map(|(name, tok)| (Cow::Borrowed(name), tok))
         .chain(emojis::iter().flat_map(|emoji| {
@@ -92,8 +96,8 @@ lazy_static! {
                 .shortcodes()
                 .map(|code| (Cow::Owned(format!(":{code}:")), Token::Symbol))
         }))
-        .collect();
-}
+        .collect()
+});
 
 pub fn superscript_char(inp: char) -> Option<char> {
     match inp {
@@ -188,6 +192,7 @@ pub fn subscript_char(inp: char) -> Option<char> {
         't' => Some('ₜ'),
         'u' => Some('ᵤ'),
         'v' => Some('ᵥ'),
+        'j' => Some('ⱼ'),
         'x' => Some('ₓ'),
         '0' => Some('₀'),
         '1' => Some('₁'),
@@ -299,6 +304,8 @@ pub fn symbol_str(inp: &str, skin_tone: SkinTone) -> &str {
         "nnn" | "bigcap" => "⋂",
         "uu" | "cup" => "∪",
         "uuu" | "bigcup" => "⋃",
+        "ominus" => "⊖",
+        "oslash" => "⊘",
         // relations
         "=" => "=",
         "!=" | "ne" => "≠",
@@ -318,9 +325,13 @@ pub fn symbol_str(inp: &str, skin_tone: SkinTone) -> &str {
         "sup" | "supset" => "⊃",
         "sube" | "subseteq" => "⊆",
         "supe" | "supseteq" => "⊇",
+        "!sub" | "nsub" => "⊄",
+        "!sup" | "nsup" => "⊅",
+        "!sube" | "nsubseteq" => "⊈",
+        "!supe" | "nsupseteq" => "⊉",
         "-=" | "equiv" => "≡",
         "~=" | "cong" => "≅",
-        "~~" | "aprox" => "≈",
+        "~~" | "approx" => "≈",
         "~" | "sim" => "~",
         "prop" | "propto" => "∝",
         // logical
@@ -341,6 +352,10 @@ pub fn symbol_str(inp: &str, skin_tone: SkinTone) -> &str {
         ":|:" | "|" => "|",
         "int" => "∫",
         "oint" => "∮",
+        "iint" => "∬",
+        "iiint" => "∭",
+        "oiint" => "∯",
+        "oiiint" => "∰",
         "del" | "partial" => "∂",
         "grad" | "nabla" => "∇",
         "+-" | "pm" => "±",
@@ -369,7 +384,9 @@ pub fn symbol_str(inp: &str, skin_tone: SkinTone) -> &str {
         "ell" => "ℓ",
         // arrows
         "uarr" | "uparrow" => "↑",
+        "uArr" | "Uparrow" => "⇑",
         "darr" | "downarrow" => "↓",
+        "dArr" | "Downarrow" => "⇓",
         "rarr" | "rightarrow" | "->" | "to" => "→",
         ">->" | "rightarrowtail" => "↣",
         "->>" | "twoheadrightarrow" => "↠",
@@ -396,7 +413,7 @@ pub fn left_bracket_str(inp: &str) -> &str {
         "|__" | "lfloor" => "⌊",
         "|~" | "lceiling" => "⌈",
         "|:" | "|" => "|",
-        chr => panic!("unmapped left bracket \"{chr}\""),
+        _ => unreachable!("matches all valid left bracket strs"),
     }
 }
 
@@ -410,7 +427,7 @@ pub fn right_bracket_str(inp: &str) -> &str {
         "__|" | "rfloor" => "⌋",
         "~|" | "rceiling" => "⌉",
         ":|" | "|" => "|",
-        chr => panic!("unmapped right bracket \"{chr}\""),
+        _ => unreachable!("matches all valid right bracket strs"),
     }
 }
 
@@ -665,5 +682,45 @@ mod tests {
             }
             chars = new_chars;
         }
+    }
+
+    #[test]
+    fn superscript_mappings() {
+        for c in 'a'..='z' {
+            if c != 'q' {
+                assert!(
+                    super::superscript_char(c).is_some(),
+                    "missing superscript for '{c}'"
+                );
+            }
+        }
+        for c in '0'..='9' {
+            assert!(super::superscript_char(c).is_some());
+        }
+        for c in ['+', '-', '=', '(', ')'] {
+            assert!(super::superscript_char(c).is_some());
+        }
+        assert!(super::superscript_char(' ').is_some());
+        assert!(super::superscript_char('!').is_none());
+    }
+
+    #[test]
+    fn subscript_mappings() {
+        for c in [
+            'a', 'e', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'r', 's', 't', 'u', 'v', 'x',
+        ] {
+            assert!(
+                super::subscript_char(c).is_some(),
+                "missing subscript for '{c}'"
+            );
+        }
+        for c in '0'..='9' {
+            assert!(super::subscript_char(c).is_some());
+        }
+        for c in ['+', '-', '=', '(', ')'] {
+            assert!(super::subscript_char(c).is_some());
+        }
+        assert!(super::subscript_char(' ').is_some());
+        assert!(super::subscript_char('z').is_none());
     }
 }
