@@ -1,6 +1,6 @@
 [package]
 name = "asciimath-unicode"
-version = "0.1.4"
+version = "0.2.0"
 description = "Convert asciimath to unicode"
 license = "MIT"
 repository = "https://github.com/erikbrinkman/asciimath-unicode-rs"
