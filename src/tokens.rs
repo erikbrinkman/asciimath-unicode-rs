@@ -1,7 +1,8 @@
 //! Definitions of the relevant tokens and conversions between them
 
-use asciimath_parser::Token;
 use asciimath_parser::prefix_map::QpTriePrefixMap;
+use asciimath_parser::tree::Expression;
+use asciimath_parser::{Token, Tokenizer};
 use emojis::SkinTone;
 use std::borrow::Cow;
 use std::sync::LazyLock;
@@ -626,6 +627,10 @@ pub fn mono_map(inp: char) -> char {
         // rest
         c => c,
     }
+}
+
+pub fn parse(inp: &str) -> Expression<'_> {
+    asciimath_parser::parse_tokens(Tokenizer::with_tokens(inp, &*TOKEN_MAP, true))
 }
 
 #[cfg(test)]

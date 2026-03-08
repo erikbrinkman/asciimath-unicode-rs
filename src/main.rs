@@ -45,6 +45,10 @@ struct Args {
     /// Skin tone for emoji
     #[arg(long, value_enum, default_value_t = Tone::Default)]
     skin_tone: Tone,
+
+    /// Render as multi-line 2D block (stacked fractions, vertical scripts, matrix grids)
+    #[arg(long)]
+    block: bool,
 }
 
 impl From<Args> for Conf {
@@ -54,6 +58,7 @@ impl From<Args> for Conf {
             vulgar_fracs: !inp.no_vulgar_fracs,
             script_fracs: !inp.no_script_fracs,
             skin_tone: inp.skin_tone.into(),
+            block: inp.block,
         }
     }
 }
@@ -63,7 +68,6 @@ fn main() {
     let mut inp = String::new();
     io::stdin().lock().read_to_string(&mut inp).unwrap();
     let mut out = io::stdout().lock();
-    let parsed = conf.parse(&inp);
-    write!(out, "{parsed}").unwrap();
+    write!(out, "{}", conf.parse(&inp)).unwrap();
     writeln!(out).unwrap();
 }
