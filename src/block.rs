@@ -737,8 +737,17 @@ impl Conf {
     fn block_func(self, func: &Func<'_>) -> Block {
         let name = Block::text(func.func);
         let name_with_script = self.block_apply_script(name, &func.script);
-        let arg = self.block_scriptfunc(func.arg());
-        name_with_script.beside(Block::space(1)).beside(arg)
+        // a bare function name (e.g. `f`, `g`) has a missing argument and takes no separator
+        if let ScriptFunc::Simple(SimpleScript {
+            simple: Simple::Missing,
+            ..
+        }) = func.arg()
+        {
+            name_with_script
+        } else {
+            let arg = self.block_scriptfunc(func.arg());
+            name_with_script.beside(Block::space(1)).beside(arg)
+        }
     }
 }
 
@@ -959,5 +968,186 @@ mod tests {
         };
         let result = conf.parse("x/y").to_string();
         assert_eq!(result, "x\n─\ny");
+    }
+
+    /// Block config that forces stacked fractions (so wrapped content is multiline).
+    fn stacked() -> Conf {
+        Conf {
+            vulgar_fracs: false,
+            script_fracs: false,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn tall_square_brackets() {
+        assert_eq!(render_block_conf("[x/y]", stacked()), "⎡x⎤\n⎢─⎥\n⎣y⎦");
+    }
+
+    #[test]
+    fn tall_curly_brackets() {
+        assert_eq!(render_block_conf("{x/y}", stacked()), "⎧x⎫\n⎨─⎬\n⎩y⎭");
+    }
+
+    #[test]
+    fn tall_vertical_bars() {
+        assert_eq!(render_block_conf("|x/y|", stacked()), "│x│\n│─│\n│y│");
+    }
+
+    #[test]
+    fn tall_angle_brackets() {
+        assert_eq!(render_block_conf("(:x/y:)", stacked()), "╱x╲\n⎜─⎟\n╲y╱");
+    }
+
+    #[test]
+    fn spaced_symbol_operator() {
+        // `xx` renders as a spaced `×`, exercising `is_spaced_operator`.
+        let result = render_block_conf("a/b xx c/d", stacked());
+        assert_eq!(result, "a   c\n─ × ─\nb   d");
+    }
+
+    #[test]
+    fn vertical_superscript_fraction() {
+        let result = render_block_conf("x^(a/b)", stacked());
+        assert_eq!(result, " ⎛a⎞\n ⎜─⎟\n ⎝b⎠\nx");
+    }
+
+    #[test]
+    fn vertical_subscript_fraction() {
+        let result = render_block_conf("x_(a/b)", stacked());
+        assert_eq!(result, "x\n ⎛a⎞\n ⎜─⎟\n ⎝b⎠");
+    }
+
+    #[test]
+    fn vertical_subsuper_fraction() {
+        let result = render_block_conf("x_(a/b)^(c/d)", stacked());
+        let lines: Vec<&str> = result.lines().collect();
+        // superscript stacked above, base, subscript stacked below
+        assert_eq!(lines.len(), 7);
+        assert!(result.contains('c') && result.contains('d'));
+        assert!(result.contains('a') && result.contains('b'));
+    }
+
+    #[test]
+    fn matrix_tall_content() {
+        let result = render_block_conf("[[a/b,c],[d,e/f]]", stacked());
+        assert!(result.contains('⎡') && result.contains('⎦'));
+        for needle in ['a', 'b', 'c', 'd', 'e', 'f'] {
+            assert!(result.contains(needle), "missing {needle} in:\n{result}");
+        }
+    }
+
+    #[test]
+    fn floor_stays_inline_in_block() {
+        // floor/ceil/abs fall back to inline rendering even in block mode.
+        assert_eq!(render_block_conf("floor(x/y)", stacked()), "⌊x/y⌋");
+        assert_eq!(render_block_conf("abs(x/y)", stacked()), "|x/y|");
+    }
+
+    #[test]
+    fn simple_func_in_block() {
+        // a function applied to a multiline argument renders beside it.
+        let result = render_block_conf("sin(x/y)", stacked());
+        assert!(result.contains("sin"));
+        assert_eq!(result.lines().count(), 3);
+    }
+
+    #[test]
+    fn spaced_operator_full_list() {
+        // `|->` (mapsto) is the last arm of `is_spaced_operator`, so matching it
+        // forces evaluation of every preceding operator pattern.
+        let conf = Conf {
+            block: true,
+            ..Default::default()
+        };
+        assert_eq!(conf.parse("a |-> b").to_string(), "a ↦ b");
+        assert_eq!(conf.parse("a mapsto b").to_string(), "a ↦ b");
+        assert_eq!(conf.parse("a cdot b").to_string(), "a ⋅ b");
+    }
+
+    #[test]
+    fn block_sqrt_multiline() {
+        // sqrt of a stacked fraction renders the radical beside the block
+        let result = render_block_conf("sqrt(x/y)", stacked());
+        assert_eq!(result, " ⎛x⎞\n√⎜─⎟\n ⎝y⎠");
+    }
+
+    #[test]
+    fn block_sqrt_inline() {
+        // sqrt of a single-line argument stays inline
+        assert_eq!(render_block_conf("sqrt(x)", stacked()), "√(x)");
+    }
+
+    #[test]
+    fn block_binary_root() {
+        // a non-frac binary falls back to inline rendering
+        assert_eq!(render_block_conf("root(3)(x)", stacked()), "∛(x)");
+    }
+
+    #[test]
+    fn block_inline_subsuper() {
+        // sub/superscriptable scripts render inline even in block mode
+        assert_eq!(render_block_conf("x_a^b", stacked()), "xₐᵇ");
+    }
+
+    #[test]
+    fn block_empty_input() {
+        assert_eq!(render_block_conf("", stacked()), "");
+    }
+
+    #[test]
+    fn block_frac_scriptfunc_numerator() {
+        // numerator carries a script, so the frac is rendered via the `Frac` path
+        assert_eq!(render_block_conf("x^2/y", stacked()), "x²\n──\n y");
+        assert_eq!(render_block_conf("x_i/y", stacked()), "xᵢ\n──\n y");
+    }
+
+    #[test]
+    fn block_nested_frac() {
+        let result = render_block_conf("(a/b)/(c/d)", stacked());
+        let lines: Vec<&str> = result.lines().collect();
+        assert!(lines.len() >= 5);
+        for needle in ['a', 'b', 'c', 'd'] {
+            assert!(result.contains(needle), "missing {needle} in:\n{result}");
+        }
+    }
+
+    #[test]
+    fn invisible_brackets() {
+        // `{:` and `:}` are invisible grouping brackets
+        assert_eq!(render_block_conf("{:x/y:}", stacked()), "x\n─\ny");
+        // one invisible side exercises the empty-bracket column on the other
+        assert_eq!(render_block_conf("(:x/y:}", stacked()), "╱x\n⎜─\n╲y");
+        assert_eq!(render_block_conf("{:x/y:)", stacked()), "x╲\n─⎟\ny╱");
+    }
+
+    #[test]
+    fn applied_identifier_in_stacked_frac() {
+        // numerator and denominator are identifiers applied to bracketed arguments
+        let result = render_block_conf("f(x)/g(y)", stacked());
+        assert_eq!(result, "f (x)\n─────\ng (y)");
+    }
+
+    #[test]
+    fn explicit_frac_binary_in_block() {
+        // the `frac(a)(b)` binary form stacks just like infix `a/b`
+        assert_eq!(render_block_conf("frac(a)(b)", stacked()), "a\n─\nb");
+    }
+
+    #[test]
+    fn bare_function_no_trailing_space() {
+        // a bare function name with no argument renders without a separator
+        assert_eq!(render_block("g"), "g");
+        assert_eq!(render_block("g h"), "g h");
+    }
+
+    #[test]
+    fn block_script_fraction() {
+        // with script fractions enabled, a subscriptable frac renders inline in block mode
+        let conf = Conf {
+            block: true,
+            ..Default::default()
+        };
+        assert_eq!(conf.parse("x/n").to_string(), "ˣ⁄ₙ");
     }
 }

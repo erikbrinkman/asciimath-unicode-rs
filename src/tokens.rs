@@ -553,7 +553,7 @@ pub fn frak_map(inp: char) -> char {
     match inp {
         // letterlike
         'C' => '\u{212d}',
-        'H' => '\u{201c}',
+        'H' => '\u{210c}',
         'I' => '\u{2111}',
         'R' => '\u{211c}',
         'Z' => '\u{2128}',

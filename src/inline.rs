@@ -343,7 +343,11 @@ impl Conf {
             ("root", sgroup!(expr), arg) if xnum!(expr, "3") => self.inline_root('∛', arg, out),
             ("root", sgroup!(expr), arg) if xnum!(expr, "4") => self.inline_root('∜', arg, out),
             // frac
-            ("frac", numer, denom) => self.inline_simplefrac(numer, denom, out),
+            ("frac", numer, denom) => self.inline_simplefrac(numer, denom, out).or_else(|_| {
+                self.inline_simple(numer, out)?;
+                out.write_char('/')?;
+                self.inline_simple(denom, out)
+            }),
             // stackrel / overset combining
             (o @ ("stackrel" | "overset"), f @ iden!("a"), a) => {
                 self.inline_cover(o, f, a, '\u{0363}', out)
@@ -675,7 +679,15 @@ impl Conf {
     fn inline_func(self, func: &Func<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
         out.write_str(func.func)?;
         self.inline_script(&func.script, out)?;
-        out.write_char(' ')?;
+        // a bare function name (e.g. `f`, `g`) has a missing argument and takes no separator
+        if let ScriptFunc::Simple(SimpleScript {
+            simple: Simple::Missing,
+            ..
+        }) = func.arg()
+        {
+        } else {
+            out.write_char(' ')?;
+        }
         self.inline_scriptfunc(func.arg(), out)
     }
 
@@ -1335,5 +1347,221 @@ mod tests {
         // non-ASCII characters pass through as identifiers
         let res = super::super::parse_unicode("λ").to_string();
         assert_eq!(res, "λ");
+    }
+
+    #[test]
+    fn font_operators() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("bb(x)"), "𝐱");
+        assert_eq!(render("mathbf(x)"), "𝐱");
+        assert_eq!(render("bbb(R)"), "ℝ");
+        assert_eq!(render("mathbb(R)"), "ℝ");
+        assert_eq!(render("cc(L)"), "ℒ");
+        assert_eq!(render("tt(a)"), "𝚊");
+        assert_eq!(render("fr(a)"), "𝔞");
+        // `g` is a function token; the fraktur arg must not carry a trailing space
+        assert_eq!(render("fr(g)"), "𝔤");
+        // fraktur letterlike capitals use dedicated black-letter symbols
+        assert_eq!(render("fr(C)"), "ℭ");
+        assert_eq!(render("fr(H)"), "ℌ");
+        assert_eq!(render("fr(I)"), "ℑ");
+        assert_eq!(render("fr(R)"), "ℜ");
+        assert_eq!(render("fr(Z)"), "ℨ");
+        assert_eq!(render("sf(h)"), "𝗁");
+        assert_eq!(render("it(k)"), "𝑘");
+        // double-struck n-ary summation has its own mapping
+        assert_eq!(render("bbb(sum)"), "⅀");
+    }
+
+    #[test]
+    fn bare_function_has_no_trailing_space() {
+        // `f` and `g` are function tokens; with no argument they render as just the name
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("g"), "g");
+        assert_eq!(render("f"), "f");
+        assert_eq!(render("g^2"), "g²");
+        // a separator is still inserted when an argument follows
+        assert_eq!(render("g h"), "g h");
+        assert_eq!(render("sin x"), "sin x");
+    }
+
+    #[test]
+    fn explicit_frac_binary_falls_back() {
+        // `frac(x)(y)` cannot script-render, but must not error/panic — it falls back to `/`
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("frac(x)(y)"), "(x)/(y)");
+        // vulgar/script forms still apply when possible
+        assert_eq!(render("frac(1)(2)"), "½");
+    }
+
+    #[test]
+    fn delimiter_functions() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("abs(x)"), "|x|");
+        assert_eq!(render("ceil(x)"), "⌈x⌉");
+        assert_eq!(render("floor(x)"), "⌊x⌋");
+        assert_eq!(render("norm(v)"), "||v||");
+        // text/mbox renders its content with no delimiters
+        assert_eq!(render("text(hi)"), "hi");
+    }
+
+    #[test]
+    fn overline_underline_cancel() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("overline(x)"), "x\u{0305}");
+        assert_eq!(render("underline(x)"), "x\u{0332}");
+        assert_eq!(render("cancel(x)"), "x\u{0336}");
+    }
+
+    #[test]
+    fn generic_unary_falls_through() {
+        // an unrecognized unary op is emitted verbatim followed by its argument.
+        let res = super::super::parse_unicode("obrace x").to_string();
+        assert_eq!(res, "obrace x");
+    }
+
+    #[test]
+    fn script_frac_grouped_numerator() {
+        // (x+1)/2 with script fracs: grouped numerator superscripted over subscript
+        let res = super::super::parse_unicode("(x+1)/2").to_string();
+        assert_eq!(res, "ˣ⁺¹⁄₂");
+    }
+
+    #[test]
+    #[allow(clippy::unicode_not_nfc)]
+    fn overset_combining_marks() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        // each latin-letter argument to overset/stackrel maps to a combining mark
+        assert_eq!(render("overset(a)(N)"), "N\u{0363}");
+        assert_eq!(render("overset(e)(N)"), "N\u{0364}");
+        assert_eq!(render("overset(i)(N)"), "N\u{0365}");
+        assert_eq!(render("overset(o)(N)"), "N\u{0366}");
+        assert_eq!(render("overset(u)(N)"), "N\u{0367}");
+        assert_eq!(render("overset(c)(N)"), "N\u{0368}");
+        assert_eq!(render("overset(d)(N)"), "N\u{0369}");
+        assert_eq!(render("overset(h)(N)"), "N\u{036a}");
+        assert_eq!(render("overset(m)(N)"), "N\u{036b}");
+        assert_eq!(render("overset(r)(N)"), "N\u{036c}");
+        assert_eq!(render("stackrel(t)(N)"), "N\u{036d}");
+        assert_eq!(render("stackrel(v)(N)"), "N\u{036e}");
+        assert_eq!(render("stackrel(x)(N)"), "N\u{036f}");
+    }
+
+    #[test]
+    fn roots() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("root(2)(x)"), "√(x)");
+        assert_eq!(render("root(3)(x)"), "∛(x)");
+        assert_eq!(render("root(4)(x)"), "∜(x)");
+        // any other index falls through to the generic binary rendering
+        assert_eq!(render("root(5)(x)"), "root (5) (x)");
+    }
+
+    #[test]
+    fn generic_binary_falls_through() {
+        // an unrecognized binary op emits `op first second`, space-separated
+        let res = super::super::parse_unicode("color(red)(x)").to_string();
+        assert_eq!(res, "color (red) (x)");
+    }
+
+    #[test]
+    fn script_frac_grouped_paths() {
+        // numerator superscriptable, denominator subscriptable: every grouped branch
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("(x+a)/(x+a)"), "ˣ⁺ᵃ⁄ₓ₊ₐ"); // (group, group)
+        assert_eq!(render("x/(x+a)"), "ˣ⁄ₓ₊ₐ"); // (simple, group)
+        assert_eq!(render("(x+a)/x"), "ˣ⁺ᵃ⁄ₓ"); // (group, simple)
+        assert_eq!(render("1/(x+a)"), "⅟ₓ₊ₐ"); // one-over reciprocal, grouped
+        assert_eq!(render("(1)/(x+a)"), "⅟ₓ₊ₐ"); // grouped `1` numerator
+        assert_eq!(render("1/y"), "1/y"); // one-over reciprocal, non-subscriptable
+    }
+
+    #[test]
+    fn script_frac_non_subscriptable_fallbacks() {
+        // capitals/symbols have no sub/superscript form, so these fall back to plain `/`
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("(A+B)/(C+D)"), "(A+B)/(C+D)");
+        assert_eq!(render("x/(A B)"), "x/(AB)");
+        assert_eq!(render("(A B)/y"), "(AB)/y");
+        assert_eq!(render("1/(A B)"), "1/(AB)");
+    }
+
+    #[test]
+    #[allow(clippy::unicode_not_nfc)]
+    fn char_modifier_group_fallbacks() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        // single symbol in a group: no precomposed form, modifier combines anyway
+        assert_eq!(render("hat(+)"), "+\u{0302}");
+        assert_eq!(render("dot(+)"), "+\u{0307}");
+        // multi-element group: not a single char, falls back to generic op rendering
+        assert_eq!(render("hat(x y)"), "hat (xy)");
+        assert_eq!(render("vec(AB)"), "vec (AB)");
+    }
+
+    #[test]
+    fn account_of_and_letter_vulgar_fracs() {
+        // ast::vulgar_frac_char's non-digit entries
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("a/c"), "℀");
+        assert_eq!(render("a/s"), "℁");
+        assert_eq!(render("A/S"), "⅍");
+        assert_eq!(render("c/o"), "℅");
+        assert_eq!(render("c/u"), "℆");
+        assert_eq!(render("0/3"), "↉");
+    }
+
+    #[test]
+    fn superscript_uppercase_and_greek() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        // every uppercase letter with a superscript form
+        assert_eq!(render("x^(DEGHIJKLMNOPRTUVW)"), "x⁽ᴰᴱᴳᴴᴵᴶᴷᴸᴹᴺᴼᴾᴿᵀᵁⱽᵂ⁾");
+        // greek letters with a superscript form
+        assert_eq!(
+            render("x^(alpha beta gamma delta epsilon theta iota phi varphi chi)"),
+            "x⁽ᵅᵝᵞᵟᵋᶿᶥᵠᶲᵡ⁾"
+        );
+    }
+
+    #[test]
+    fn subscript_greek() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("x_beta"), "xᵦ");
+        assert_eq!(render("x_gamma"), "xᵧ");
+        assert_eq!(render("x_rho"), "xᵨ");
+        assert_eq!(render("x_phi"), "xᵩ");
+        assert_eq!(render("x_chi"), "xᵪ");
+    }
+
+    #[test]
+    fn frac_level_arms_with_scripts() {
+        // when an operand carries a script the frac uses the `Frac`-level arms,
+        // which fall back to plain `/` when the script blocks sub/superscripting
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("1/x^2"), "1/x²"); // one-over reciprocal
+        assert_eq!(render("(1)/x^2"), "1/x²"); // grouped one-over
+        assert_eq!(render("(x+a)/y^2"), "(x+a)/y²"); // grouped numerator
+        assert_eq!(render("x^2/(x+a)"), "x²/(x+a)"); // grouped denominator
+    }
+
+    #[test]
+    fn modifier_on_grouped_single_symbol() {
+        // a group whose only element is a symbol is not a precomposable char
+        let res = super::super::parse_unicode("hat((+))").to_string();
+        assert_eq!(res, "hat ((+))");
+    }
+
+    #[test]
+    #[allow(clippy::unicode_not_nfc)]
+    fn modifier_on_bare_symbol() {
+        // a bare (ungrouped) symbol argument takes the combining modifier directly
+        let res = super::super::parse_unicode("vec*").to_string();
+        assert_eq!(res, "\u{22c5}\u{20d7}");
+    }
+
+    #[test]
+    fn empty_trailing_superscript() {
+        // `x^` leaves the script base `Simple::Missing`, which renders to nothing
+        let res = super::super::parse_unicode("x^").to_string();
+        assert_eq!(res, "x");
     }
 }
