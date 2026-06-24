@@ -6,6 +6,9 @@ license = "MIT"
 repository = "https://github.com/erikbrinkman/asciimath-unicode-rs"
 edition = "2024"
 rust-version = "1.85"
+documentation = "https://docs.rs/asciimath-unicode"
+keywords = ["asciimath", "unicode", "math", "converter"]
+categories = ["text-processing", "mathematics"]
 
 [[bin]]
 name = "asciimath-unicode"
