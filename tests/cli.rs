@@ -1,7 +1,7 @@
 //! Integration tests for the `asciimath-unicode` binary.
 #![cfg(feature = "binary")]
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 
 /// Run the binary with `args`, feeding `input` on stdin, and return its stdout.
@@ -60,6 +60,32 @@ fn no_strip_brackets() {
 #[test]
 fn block_mode() {
     assert_eq!(run(&["--block"], "x/y"), "x\n─\ny\n");
+}
+
+#[test]
+fn closed_stdout_pipe_is_not_an_error() {
+    // a reader that closes the pipe early must not make the binary fail
+    let mut child = Command::new(env!("CARGO_BIN_EXE_asciimath-unicode"))
+        .arg("--block")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn binary");
+    // a large block expression produces multi-line output larger than the pipe buffer
+    let input = "sum_(i=1)^n ".repeat(20_000);
+    child
+        .stdin
+        .take()
+        .expect("stdin not piped")
+        .write_all(input.as_bytes())
+        .expect("failed to write stdin");
+    // read a single byte, then drop the read end to close the pipe
+    let mut stdout = child.stdout.take().expect("stdout not piped");
+    let mut one = [0u8; 1];
+    let _ = stdout.read(&mut one);
+    drop(stdout);
+    let status = child.wait().expect("failed to wait on binary");
+    assert!(status.success(), "broken pipe should exit successfully");
 }
 
 #[test]
