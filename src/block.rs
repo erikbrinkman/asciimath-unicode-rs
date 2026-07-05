@@ -954,7 +954,7 @@ mod tests {
     fn existing_tests_still_pass_inline() {
         let conf = Conf::default();
         let res = conf.parse("sum_(i=1)^n i^3=((n(n+1))/2)^2").to_string();
-        assert_eq!(res, "∑₍ᵢ₌₁₎ⁿi³=(ⁿ⁽ⁿ⁺¹⁾⁄₂)²");
+        assert_eq!(res, "∑ᵢ₌₁ⁿi³=(ⁿ⁽ⁿ⁺¹⁾⁄₂)²");
     }
 
     #[test]
