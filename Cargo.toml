@@ -18,9 +18,9 @@ required-features = ["binary"]
 binary = ["clap"]
 
 [dependencies]
-asciimath-parser = "0.1"
+asciimath-parser = "0.2"
 clap = { version = "4.1", optional = true, features = ["derive", "wrap_help"] }
-emojis = "0.8"
+emojis = "0.9"
 unicode-normalization = "0.1"
 unicode-width = "0.2"
 
