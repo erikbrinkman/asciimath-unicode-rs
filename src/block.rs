@@ -560,8 +560,13 @@ impl Conf {
 
     fn block_simplefunc(self, func: &SimpleFunc<'_>) -> Block {
         let name = Block::text(func.func);
-        let arg = self.block_simple(func.arg());
-        name.beside(Block::space(1)).beside(arg)
+        // a bare function name has a missing argument and takes no separator
+        if matches!(func.arg(), Simple::Missing) {
+            name
+        } else {
+            let arg = self.block_simple(func.arg());
+            name.beside(Block::space(1)).beside(arg)
+        }
     }
 
     fn block_unary(self, unary: &SimpleUnary<'_>) -> Block {
