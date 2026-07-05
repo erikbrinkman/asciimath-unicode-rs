@@ -473,7 +473,7 @@ pub fn bold_map(inp: char) -> char {
         c @ '\u{1d49c}'..='\u{1d4cf}' => map_range(c, '\u{1d49c}', '\u{1d4d0}'),
         // frak
         '\u{212d}' => '\u{1d56e}',
-        '\u{201c}' => '\u{1d573}',
+        '\u{210c}' => '\u{1d573}',
         '\u{2111}' => '\u{1d574}',
         '\u{211c}' => '\u{1d57d}',
         '\u{2128}' => '\u{1d585}',
@@ -695,6 +695,14 @@ mod tests {
         assert_eq!(super::bold_map('α'), '\u{1d6c2}');
         assert_eq!(super::bold_map('β'), '\u{1d6c3}');
         assert_eq!(super::bold_map('ω'), '\u{1d6da}');
+    }
+
+    #[test]
+    fn bold_fraktur_letterlike() {
+        // bold-fraktur of the letterlike ℌ (U+210C) is BOLD FRAKTUR CAPITAL H (U+1D573)
+        assert_eq!(super::bold_map('\u{210c}'), '\u{1d573}');
+        // a literal left double quotation mark must pass through untouched
+        assert_eq!(super::bold_map('\u{201c}'), '\u{201c}');
     }
 
     #[test]
