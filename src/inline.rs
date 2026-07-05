@@ -628,15 +628,29 @@ impl Conf {
         }
     }
 
+    /// Render a simple, stripping surrounding brackets when `strip_brackets` is on.
+    fn inline_simple_stripped(
+        self,
+        simple: &Simple<'_>,
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
+        match simple {
+            sgroup!(expr) if self.strip_brackets => self.inline_expression(expr, out),
+            simple => self.inline_simple(simple, out),
+        }
+    }
+
     fn inline_script(self, script: &Script<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
         let mut sink = Sink;
         match script {
             Script::None => Ok(()),
             Script::Sub(sub) => {
                 if let Some(sconf) = out.conf.with_sub()
-                    && self.inline_simple(sub, &mut sconf.wrap(&mut sink)).is_ok()
+                    && self
+                        .inline_simple_stripped(sub, &mut sconf.wrap(&mut sink))
+                        .is_ok()
                 {
-                    self.inline_simple(sub, &mut sconf.wrap(out.inner))
+                    self.inline_simple_stripped(sub, &mut sconf.wrap(out.inner))
                 } else {
                     out.write_char('_')?;
                     self.inline_simple(sub, out)
@@ -644,9 +658,11 @@ impl Conf {
             }
             Script::Super(sup) => {
                 if let Some(sconf) = out.conf.with_sup()
-                    && self.inline_simple(sup, &mut sconf.wrap(&mut sink)).is_ok()
+                    && self
+                        .inline_simple_stripped(sup, &mut sconf.wrap(&mut sink))
+                        .is_ok()
                 {
-                    self.inline_simple(sup, &mut sconf.wrap(out.inner))
+                    self.inline_simple_stripped(sup, &mut sconf.wrap(out.inner))
                 } else {
                     out.write_char('^')?;
                     self.inline_simple(sup, out)
@@ -655,15 +671,15 @@ impl Conf {
             Script::Subsuper(sub, sup) => {
                 if let Some(sub_conf) = out.conf.with_sub()
                     && self
-                        .inline_simple(sub, &mut sub_conf.wrap(&mut sink))
+                        .inline_simple_stripped(sub, &mut sub_conf.wrap(&mut sink))
                         .is_ok()
                     && let Some(sup_conf) = out.conf.with_sup()
                     && self
-                        .inline_simple(sup, &mut sup_conf.wrap(&mut sink))
+                        .inline_simple_stripped(sup, &mut sup_conf.wrap(&mut sink))
                         .is_ok()
                 {
-                    self.inline_simple(sub, &mut sub_conf.wrap(out.inner))?;
-                    self.inline_simple(sup, &mut sup_conf.wrap(out.inner))
+                    self.inline_simple_stripped(sub, &mut sub_conf.wrap(out.inner))?;
+                    self.inline_simple_stripped(sup, &mut sup_conf.wrap(out.inner))
                 } else {
                     out.write_char('_')?;
                     self.inline_simple(sub, out)?;
@@ -970,7 +986,7 @@ mod tests {
     #[test]
     fn example() {
         let ex = "sum_(i=1)^n i^3=((n(n+1))/2)^2";
-        let expected = "∑₍ᵢ₌₁₎ⁿi³=(ⁿ⁽ⁿ⁺¹⁾⁄₂)²";
+        let expected = "∑ᵢ₌₁ⁿi³=(ⁿ⁽ⁿ⁺¹⁾⁄₂)²";
 
         let res = super::super::parse_unicode(ex).to_string();
         assert_eq!(res, expected);
@@ -1151,6 +1167,24 @@ mod tests {
 
         let res = super::super::parse_unicode("x_y").to_string();
         assert_eq!(res, "x_y");
+    }
+
+    #[test]
+    fn script_strips_group_brackets() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        // a subscriptable group renders its inner expression without the brackets
+        assert_eq!(render("x_(2i)"), "x₂ᵢ");
+        assert_eq!(render("x^(2i)"), "x²ⁱ");
+        assert_eq!(render("x_(i)^(2j)"), "xᵢ²ʲ");
+        // a group that can't be subscripted keeps its brackets to preserve grouping
+        assert_eq!(render("x_(A+B)"), "x_(A+B)");
+
+        // --no-strip-brackets leaves the brackets in place
+        let conf = Conf {
+            strip_brackets: false,
+            ..Default::default()
+        };
+        assert_eq!(conf.parse("x_(2i)").to_string(), "x₍₂ᵢ₎");
     }
 
     #[test]
@@ -1539,11 +1573,11 @@ mod tests {
     fn superscript_uppercase_and_greek() {
         let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         // every uppercase letter with a superscript form
-        assert_eq!(render("x^(DEGHIJKLMNOPRTUVW)"), "x⁽ᴰᴱᴳᴴᴵᴶᴷᴸᴹᴺᴼᴾᴿᵀᵁⱽᵂ⁾");
+        assert_eq!(render("x^(DEGHIJKLMNOPRTUVW)"), "xᴰᴱᴳᴴᴵᴶᴷᴸᴹᴺᴼᴾᴿᵀᵁⱽᵂ");
         // greek letters with a superscript form
         assert_eq!(
             render("x^(alpha beta gamma delta epsilon theta iota phi varphi chi)"),
-            "x⁽ᵅᵝᵞᵟᵋᶿᶥᵠᶲᵡ⁾"
+            "xᵅᵝᵞᵟᵋᶿᶥᵠᶲᵡ"
         );
     }
 
