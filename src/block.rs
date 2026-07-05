@@ -200,17 +200,17 @@ fn tall_bracket_left(bracket: &str, height: usize) -> Block {
     } else if height <= 1 {
         Block::text(bracket)
     } else {
-        let (top, mid_top, mid_bot, bot) = match bracket {
-            "(" | "left(" => ('⎛', '⎜', '⎜', '⎝'),
-            "[" | "left[" => ('⎡', '⎢', '⎢', '⎣'),
-            "⟨" | "(:" | "langle" | "<<" => ('╱', '⎜', '⎜', '╲'),
-            "⌊" | "|__" | "lfloor" => ('⎢', '⎢', '⎜', '⌊'),
-            "⌈" | "|~" | "lceiling" => ('⌈', '⎢', '⎢', '⎜'),
-            "{" if height == 2 => ('⎰', ' ', ' ', '⎱'),
-            "{" if height.is_multiple_of(2) => ('⎧', '⎭', '⎫', '⎩'),
-            "{" => ('⎧', '│', '⎨', '⎩'),
+        let (top, mid_top, mid_bot, bot, fill) = match bracket {
+            "(" | "left(" => ('⎛', '⎜', '⎜', '⎝', '⎜'),
+            "[" | "left[" => ('⎡', '⎢', '⎢', '⎣', '⎢'),
+            "⟨" | "(:" | "langle" | "<<" => ('╱', '⎜', '⎜', '╲', '⎜'),
+            "⌊" | "|__" | "lfloor" => ('⎢', '⎢', '⎢', '⌊', '⎢'),
+            "⌈" | "|~" | "lceiling" => ('⌈', '⎢', '⎢', '⎢', '⎢'),
+            "{" if height == 2 => ('⎰', ' ', ' ', '⎱', ' '),
+            "{" if height.is_multiple_of(2) => ('⎧', '⎭', '⎫', '⎩', '⎪'),
+            "{" => ('⎧', '⎪', '⎨', '⎩', '⎪'),
             // "|", "|:", and anything else
-            _ => ('│', '│', '│', '│'),
+            _ => ('│', '│', '│', '│', '│'),
         };
         let mut lines = Vec::with_capacity(height);
         lines.push(top.to_string());
@@ -221,7 +221,7 @@ fn tall_bracket_left(bracket: &str, height: usize) -> Block {
                 } else if idx == height / 2 - 1 {
                     mid_top
                 } else {
-                    '│'
+                    fill
                 }
                 .to_string(),
             );
@@ -245,17 +245,17 @@ fn tall_bracket_right(bracket: &str, height: usize) -> Block {
     } else if height <= 1 {
         Block::text(bracket)
     } else {
-        let (top, mid_top, mid_bot, bot) = match bracket {
-            ")" | "right)" => ('⎞', '⎟', '⎟', '⎠'),
-            "]" | "right]" => ('⎤', '⎥', '⎥', '⎦'),
-            "⟩" | ":)" | "rangle" | ">>" => ('╲', '⎟', '⎟', '╱'),
-            "⌋" | "__|" | "rfloor" => ('⎥', '⎥', '⎟', '⌋'),
-            "⌉" | "~|" | "rceiling" => ('⌉', '⎥', '⎥', '⎟'),
-            "}" if height == 2 => ('⎱', ' ', ' ', '⎰'),
-            "}" if height.is_multiple_of(2) => ('⎫', '⎩', '⎧', '⎭'),
-            "}" => ('⎫', '│', '⎬', '⎭'),
+        let (top, mid_top, mid_bot, bot, fill) = match bracket {
+            ")" | "right)" => ('⎞', '⎟', '⎟', '⎠', '⎟'),
+            "]" | "right]" => ('⎤', '⎥', '⎥', '⎦', '⎥'),
+            "⟩" | ":)" | "rangle" | ">>" => ('╲', '⎟', '⎟', '╱', '⎟'),
+            "⌋" | "__|" | "rfloor" => ('⎥', '⎥', '⎥', '⌋', '⎥'),
+            "⌉" | "~|" | "rceiling" => ('⌉', '⎥', '⎥', '⎥', '⎥'),
+            "}" if height == 2 => ('⎱', ' ', ' ', '⎰', ' '),
+            "}" if height.is_multiple_of(2) => ('⎫', '⎩', '⎧', '⎭', '⎪'),
+            "}" => ('⎫', '⎪', '⎬', '⎭', '⎪'),
             // "|", ":|", and anything else
-            _ => ('│', '│', '│', '│'),
+            _ => ('│', '│', '│', '│', '│'),
         };
         let mut lines = Vec::with_capacity(height);
         lines.push(top.to_string());
@@ -266,7 +266,7 @@ fn tall_bracket_right(bracket: &str, height: usize) -> Block {
                 } else if idx == height / 2 - 1 {
                     mid_top
                 } else {
-                    '│'
+                    fill
                 }
                 .to_string(),
             );
@@ -1002,6 +1002,21 @@ mod tests {
     #[test]
     fn tall_angle_brackets() {
         assert_eq!(render_block_conf("(:x/y:)", stacked()), "╱x╲\n⎜─⎟\n╲y╱");
+    }
+
+    #[test]
+    fn tall_brackets_use_uniform_glyphs() {
+        // every interior row of a tall paren uses the paren extension ⎜, never the
+        // box-drawing │ filler
+        assert_eq!(
+            render_block_conf("((a/b)/(c/d))", stacked()),
+            "⎛a⎞\n⎜─⎟\n⎜b⎟\n⎜─⎟\n⎜c⎟\n⎜─⎟\n⎝d⎠"
+        );
+        // ceiling columns stay in the square-bracket family (no stray paren ⎜/⎟)
+        assert_eq!(
+            render_block_conf("|~ (a/b)/(c/d) ~|", stacked()),
+            "⌈a⌉\n⎢─⎥\n⎢b⎥\n⎢─⎥\n⎢c⎥\n⎢─⎥\n⎢d⎥"
+        );
     }
 
     #[test]
