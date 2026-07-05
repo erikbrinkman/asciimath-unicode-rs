@@ -445,7 +445,7 @@ pub fn bold_map(inp: char) -> char {
         c @ '0'..='9' => map_range(c, '0', '\u{1d7ce}'),
         c @ 'Α'..='Ω' => map_range(c, '\u{0391}', '\u{1d6a8}'),
         'ϴ' => '\u{1d6b9}',
-        c @ 'α'..='ω' => map_range(c, '\u{03b1}', '\u{1d6da}'),
+        c @ 'α'..='ω' => map_range(c, '\u{03b1}', '\u{1d6c2}'),
         '∂' => '𝛛',
         'ϵ' => '𝛜',
         'ϑ' => '𝛝',
@@ -687,6 +687,14 @@ mod tests {
             }
             chars = new_chars;
         }
+    }
+
+    #[test]
+    fn bold_lowercase_greek() {
+        // the bold small greek block starts at MATHEMATICAL BOLD SMALL ALPHA (U+1D6C2)
+        assert_eq!(super::bold_map('α'), '\u{1d6c2}');
+        assert_eq!(super::bold_map('β'), '\u{1d6c3}');
+        assert_eq!(super::bold_map('ω'), '\u{1d6da}');
     }
 
     #[test]
