@@ -68,7 +68,7 @@ fn main() {
     let mut inp = String::new();
     io::stdin().lock().read_to_string(&mut inp).unwrap();
     let mut out = io::stdout().lock();
-    // a reader closing the pipe early (e.g. `| head`) is expected; anything else panics
+    // a closed pipe (e.g. `| head`) is normal, not an error
     if let Err(err) = write!(out, "{}", conf.parse(&inp)).and_then(|()| writeln!(out))
         && err.kind() != io::ErrorKind::BrokenPipe
     {
