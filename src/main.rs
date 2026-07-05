@@ -68,6 +68,10 @@ fn main() {
     let mut inp = String::new();
     io::stdin().lock().read_to_string(&mut inp).unwrap();
     let mut out = io::stdout().lock();
-    write!(out, "{}", conf.parse(&inp)).unwrap();
-    writeln!(out).unwrap();
+    // a reader closing the pipe early (e.g. `| head`) is expected; anything else panics
+    if let Err(err) = write!(out, "{}", conf.parse(&inp)).and_then(|()| writeln!(out))
+        && err.kind() != io::ErrorKind::BrokenPipe
+    {
+        panic!("failed to write output: {err}");
+    }
 }
