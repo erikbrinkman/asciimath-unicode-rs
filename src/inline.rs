@@ -231,7 +231,10 @@ impl Conf {
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
         out.write_str(simple.func)?;
-        out.write_char(' ')?;
+        // a bare function name has a missing argument and takes no separator
+        if !matches!(simple.arg(), Simple::Missing) {
+            out.write_char(' ')?;
+        }
         self.inline_simple(simple.arg(), out)
     }
 
@@ -1383,6 +1386,10 @@ mod tests {
         // a separator is still inserted when an argument follows
         assert_eq!(render("g h"), "g h");
         assert_eq!(render("sin x"), "sin x");
+        // a bare function reached through the `Simple::Func` path (as a unary
+        // argument or a script base) also omits the trailing separator
+        assert_eq!(render("sqrt sin"), "√sin");
+        assert_eq!(render("x^sin"), "xˢⁱⁿ");
     }
 
     #[test]
