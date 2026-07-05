@@ -264,7 +264,8 @@ impl Conf {
                     .is_ok()
                     && let Some(res) = single.0
                 {
-                    out.write_char(res)?;
+                    // res is already styled; write to inner so the font isn't re-applied
+                    out.inner.write_char(res)?;
                     out.write_char(chr)
                 } else {
                     self.inline_bgeneric(op, first, arg, out)
@@ -275,7 +276,8 @@ impl Conf {
                 if self.inline_simple(arg, &mut out.onto(&mut single)).is_ok()
                     && let Some(res) = single.0
                 {
-                    out.write_char(res)?;
+                    // res is already styled; write to inner so the font isn't re-applied
+                    out.inner.write_char(res)?;
                     out.write_char(chr)
                 } else {
                     self.inline_bgeneric(op, first, arg, out)
@@ -504,7 +506,8 @@ impl Conf {
                         .is_ok()
                         && let Some(res) = single.0
                     {
-                        out.write_char(res)?;
+                        // res is already styled; write to inner so the font isn't re-applied
+                        out.inner.write_char(res)?;
                         out.write_char(chr)
                     } else {
                         self.inline_ugeneric(op, arg, out)
@@ -515,7 +518,8 @@ impl Conf {
                     if self.inline_simple(arg, &mut out.onto(&mut single)).is_ok()
                         && let Some(res) = single.0
                     {
-                        out.write_char(res)?;
+                        // res is already styled; write to inner so the font isn't re-applied
+                        out.inner.write_char(res)?;
                         out.write_char(chr)
                     } else {
                         self.inline_ugeneric(op, arg, out)
@@ -1390,6 +1394,20 @@ mod tests {
         // argument or a script base) also omits the trailing separator
         assert_eq!(render("sqrt sin"), "√sin");
         assert_eq!(render("x^sin"), "xˢⁱⁿ");
+    }
+
+    #[test]
+    #[allow(clippy::unicode_not_nfc)]
+    fn nested_font_not_reapplied() {
+        // an inner font wins and must not be re-applied by an outer font when the
+        // modifier/cover retry path emits the already-styled character.
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("cc(bb x)"), "\u{1d431}"); // bold x, inner font wins
+        assert_eq!(render("hat(bb x)"), "\u{1d431}\u{0302}"); // bold x + combining hat
+        // char-modifier retry: outer cal must not re-map the bold x
+        assert_eq!(render("cc(hat(bb x))"), "\u{1d431}\u{0302}");
+        // cover retry: same, with an overset combining mark
+        assert_eq!(render("cc(overset(a)(bb x))"), "\u{1d431}\u{0363}");
     }
 
     #[test]
