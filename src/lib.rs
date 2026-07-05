@@ -46,7 +46,7 @@ mod block;
 mod inline;
 mod tokens;
 
-use asciimath_parser::tree::Expression;
+pub use asciimath_parser::tree::Expression;
 pub use emojis::SkinTone;
 use inline::Mapper;
 use std::fmt;
