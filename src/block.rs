@@ -207,7 +207,7 @@ fn tall_bracket_left(bracket: &str, height: usize) -> Block {
             "⌊" | "|__" | "lfloor" => ('⎢', '⎢', '⎜', '⌊'),
             "⌈" | "|~" | "lceiling" => ('⌈', '⎢', '⎢', '⎜'),
             "{" if height == 2 => ('⎰', ' ', ' ', '⎱'),
-            "{" if height % 2 == 0 => ('⎧', '⎭', '⎫', '⎩'),
+            "{" if height.is_multiple_of(2) => ('⎧', '⎭', '⎫', '⎩'),
             "{" => ('⎧', '│', '⎨', '⎩'),
             // "|", "|:", and anything else
             _ => ('│', '│', '│', '│'),
@@ -252,7 +252,7 @@ fn tall_bracket_right(bracket: &str, height: usize) -> Block {
             "⌋" | "__|" | "rfloor" => ('⎥', '⎥', '⎟', '⌋'),
             "⌉" | "~|" | "rceiling" => ('⌉', '⎥', '⎥', '⎟'),
             "}" if height == 2 => ('⎱', ' ', ' ', '⎰'),
-            "}" if height % 2 == 0 => ('⎫', '⎩', '⎧', '⎭'),
+            "}" if height.is_multiple_of(2) => ('⎫', '⎩', '⎧', '⎭'),
             "}" => ('⎫', '│', '⎬', '⎭'),
             // "|", ":|", and anything else
             _ => ('│', '│', '│', '│'),
