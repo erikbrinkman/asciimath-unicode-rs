@@ -48,9 +48,9 @@ assert_eq!(res, "¹⁄₂");
 ```
 
 ```rust
-use asciimath_unicode::Conf;
+use asciimath_unicode::{Conf, Layout};
 let conf = Conf {
-    block: true,
+    layout: Layout::Block,
     ..Default::default()
 };
 let res = conf.parse("x/y").to_string();
@@ -59,10 +59,9 @@ assert_eq!(res, "x\n─\ny");
 
 ## Configuration
 
-| Field            |       Type |   Default | Description                                                                       |
-|------------------|------------|-----------|-----------------------------------------------------------------------------------|
-| `strip_brackets` |     `bool` |    `true` | Drop ( ), [ ] and { } around fractions, scripts and command arguments             |
-| `vulgar_fracs`   |     `bool` |    `true` | Render fractions as vulgar fractions (e.g. ½)                                     |
-| `script_fracs`   |     `bool` |    `true` | Render fractions using super/subscripts (e.g. ¹⁄₂)                                |
-| `skin_tone`      | `SkinTone` | `Default` | Default skin tone for emojis                                                      |
-| `block`          |     `bool` |   `false` | Multi-line 2D block rendering (stacked fractions, vertical scripts, matrix grids) |
+| Field            |       Type |        Default | Description                                                           |
+|------------------|------------|----------------|-----------------------------------------------------------------------|
+| `strip_brackets` |     `bool` |         `true` | Drop ( ), [ ] and { } around fractions, scripts and command arguments |
+| `vulgar_fracs`   |     `bool` |         `true` | Render fractions as vulgar fractions (e.g. ½)                         |
+| `skin_tone`      | `SkinTone` |      `Default` | Default skin tone for emojis                                          |
+| `layout`         |   `Layout` | `InlineScript` | How to lay out the math: `InlineScript`, `InlinePlain`, or `Block`    |
