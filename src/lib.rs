@@ -59,12 +59,22 @@ pub struct Conf {
     pub strip_brackets: bool,
     /// If true, this will try to render fractions as vulgar fractions
     pub vulgar_fracs: bool,
-    /// If true, this will try to render fractions using super- and sub-scripts
-    pub script_fracs: bool,
     /// Default skin tone for emojis
     pub skin_tone: SkinTone,
-    /// If true, render as multi-line 2D block (stacked fractions, vertical scripts, matrix grids)
-    pub block: bool,
+    /// How to lay out the math
+    pub layout: Layout,
+}
+
+/// How to lay out the math
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Layout {
+    /// One line, fractions as super- and subscripts
+    #[default]
+    InlineScript,
+    /// One line, fractions with a slash
+    InlinePlain,
+    /// Several lines, with stacked fractions and grids
+    Block,
 }
 
 impl Default for Conf {
@@ -72,14 +82,18 @@ impl Default for Conf {
         Conf {
             strip_brackets: true,
             vulgar_fracs: true,
-            script_fracs: true,
             skin_tone: SkinTone::Default,
-            block: false,
+            layout: Layout::InlineScript,
         }
     }
 }
 
 impl Conf {
+    /// Whether one-line fractions may be written as super- and subscripts
+    fn script_fracs(self) -> bool {
+        self.layout != Layout::InlinePlain
+    }
+
     /// Parse an asciimath string into an [`Asciimath`] value that implements [`fmt::Display`]
     #[must_use]
     pub fn parse(self, inp: &str) -> Asciimath<'_> {
@@ -103,7 +117,7 @@ pub struct Asciimath<'a> {
 
 impl fmt::Display for Asciimath<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.conf.block {
+        if self.conf.layout == Layout::Block {
             let block = self.conf.block_expression(&self.expr);
             write!(f, "{block}")
         } else {

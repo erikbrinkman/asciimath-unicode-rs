@@ -626,6 +626,7 @@ impl Conf {
 #[cfg(test)]
 mod tests {
     use super::{Block, Conf};
+    use crate::Layout;
     use crate::tokens;
     use std::fmt::Write;
 
@@ -748,7 +749,7 @@ mod tests {
     fn stacked_frac_with_expressions() {
         let conf = Conf {
             vulgar_fracs: false,
-            script_fracs: false,
+            layout: Layout::Block,
             ..Default::default()
         };
         let result = render_block_conf("(x+1)/y", conf);
@@ -759,7 +760,7 @@ mod tests {
     fn stacked_frac_denom_expr() {
         let conf = Conf {
             vulgar_fracs: false,
-            script_fracs: false,
+            layout: Layout::Block,
             ..Default::default()
         };
         let result = render_block_conf("x/(y+1)", conf);
@@ -803,7 +804,7 @@ mod tests {
     fn operator_spacing() {
         let conf = Conf {
             vulgar_fracs: false,
-            script_fracs: false,
+            layout: Layout::Block,
             ..Default::default()
         };
         let result = render_block_conf("x + y", conf);
@@ -828,7 +829,7 @@ mod tests {
     #[test]
     fn conf_block_true_uses_block_rendering() {
         let conf = Conf {
-            block: true,
+            layout: Layout::Block,
             ..Default::default()
         };
         let result = conf.parse("x/y").to_string();
@@ -839,7 +840,7 @@ mod tests {
     fn stacked() -> Conf {
         Conf {
             vulgar_fracs: false,
-            script_fracs: false,
+            layout: Layout::Block,
             ..Default::default()
         }
     }
@@ -983,7 +984,7 @@ mod tests {
         // `|->` (mapsto) is the last arm of `is_spaced_operator`, so matching it
         // forces evaluation of every preceding operator pattern.
         let conf = Conf {
-            block: true,
+            layout: Layout::Block,
             ..Default::default()
         };
         assert_eq!(conf.parse("a |-> b").to_string(), "a ↦ b");
@@ -1079,7 +1080,7 @@ mod tests {
     fn block_script_fraction() {
         // script fractions are inline-only; block mode stacks
         let conf = Conf {
-            block: true,
+            layout: Layout::Block,
             ..Default::default()
         };
         assert_eq!(conf.parse("x/n").to_string(), "x\n─\nn");

@@ -717,12 +717,12 @@ impl Conf {
         {
             out.write_char(frac)
         } else if self.vulgar_fracs
-            && self.script_fracs
+            && self.script_fracs()
             && matches!(self.unwrap_single(numer), num!("1"))
             && !is_negated(denom)
         {
             self.inline_sone(denom, out)
-        } else if self.script_fracs
+        } else if self.script_fracs()
             && let Some(sup_conf) = out.conf.with_sup()
             && self
                 .inline_simple_stripped(numer, &mut sup_conf.wrap(&mut Sink))
@@ -767,7 +767,7 @@ impl Conf {
                 })
             }
             (script_func!(num), den)
-                if self.script_fracs
+                if self.script_fracs()
                     && self.vulgar_fracs
                     && matches!(self.unwrap_single(num), num!("1"))
                     && !matches!(den, script_func!(den) if is_negated(den)) =>
@@ -778,7 +778,7 @@ impl Conf {
                 })
             }
             (num, den) => {
-                if self.script_fracs
+                if self.script_fracs()
                     && let Some(sup_conf) = out.conf.with_sup()
                     && self
                         .inline_scriptfunc_stripped(num, &mut sup_conf.wrap(&mut Sink))
@@ -840,7 +840,7 @@ impl Conf {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Conf, SkinTone};
+    use super::super::{Conf, Layout, SkinTone};
 
     #[test]
     fn example() {
@@ -887,7 +887,7 @@ mod tests {
     #[test]
     fn script_fracs() {
         let opts = Conf {
-            script_fracs: true,
+            layout: Layout::InlineScript,
             strip_brackets: false,
             ..Default::default()
         };
@@ -901,7 +901,7 @@ mod tests {
     #[test]
     fn stripped_script_fracs() {
         let opts = Conf {
-            script_fracs: true,
+            layout: Layout::InlineScript,
             ..Default::default()
         };
 
@@ -924,7 +924,7 @@ mod tests {
         assert_eq!(res, "⅟ₛᵢₙ ₓ");
 
         let opts = Conf {
-            script_fracs: false,
+            layout: Layout::InlinePlain,
             vulgar_fracs: false,
             strip_brackets: false,
             ..Default::default()
@@ -936,7 +936,7 @@ mod tests {
     #[test]
     fn normal_fracs() {
         let opts = Conf {
-            script_fracs: false,
+            layout: Layout::InlinePlain,
             vulgar_fracs: false,
             strip_brackets: false,
             ..Default::default()
@@ -1195,7 +1195,7 @@ mod tests {
         let opts = Conf {
             strip_brackets: false,
             vulgar_fracs: false,
-            script_fracs: false,
+            layout: Layout::InlinePlain,
             ..Default::default()
         };
         let res = opts.parse("(x)/y").to_string();
@@ -1207,7 +1207,7 @@ mod tests {
         let opts = Conf {
             strip_brackets: true,
             vulgar_fracs: false,
-            script_fracs: false,
+            layout: Layout::InlinePlain,
             ..Default::default()
         };
         let res = opts.parse("(x)/y").to_string();
@@ -1219,7 +1219,7 @@ mod tests {
         let opts = Conf {
             strip_brackets: false,
             vulgar_fracs: true,
-            script_fracs: false,
+            layout: Layout::InlinePlain,
             ..Default::default()
         };
         let res = opts.parse("1/2").to_string();
@@ -1231,7 +1231,7 @@ mod tests {
         let opts = Conf {
             strip_brackets: false,
             vulgar_fracs: false,
-            script_fracs: true,
+            layout: Layout::InlineScript,
             ..Default::default()
         };
         // y is not subscriptable, falls through to plain frac
