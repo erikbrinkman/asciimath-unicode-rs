@@ -459,15 +459,11 @@ impl Conf {
     }
 
     fn block_unary(self, unary: &SimpleUnary<'_>) -> Block {
-        if unary.op == "sqrt" {
-            let arg = self.block_simple(unary.arg());
-            if arg.is_multiline() {
-                return Block::text("√").beside(arg);
-            }
-            let mut s = String::from("√");
-            self.inline_simple(unary.arg(), &mut Mapper::new(&mut s))
-                .unwrap_or_else(|_| unreachable!("write to String is infallible"));
-            Block::text(s)
+        if unary.op == "sqrt"
+            && let arg = self.block_simple(unary.arg())
+            && arg.is_multiline()
+        {
+            Block::text("√").beside(arg)
         } else {
             let mut s = String::new();
             let mut mapper = Mapper::new(&mut s);
@@ -977,13 +973,15 @@ mod tests {
     #[test]
     fn block_sqrt_inline() {
         // sqrt of a single-line argument stays inline
-        assert_eq!(render_block_conf("sqrt(x)", stacked()), "√(x)");
+        assert_eq!(render_block_conf("sqrt(x)", stacked()), "√x");
+        assert_eq!(render_block_conf("sqrt(x+1)", stacked()), "√(x+1)");
     }
 
     #[test]
     fn block_binary_root() {
         // a non-frac binary falls back to inline rendering
-        assert_eq!(render_block_conf("root(3)(x)", stacked()), "∛(x)");
+        assert_eq!(render_block_conf("root(3)(x)", stacked()), "∛x");
+        assert_eq!(render_block_conf("root(5)(x)", stacked()), "⁵√x");
     }
 
     #[test]

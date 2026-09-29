@@ -171,6 +171,8 @@ pub fn superscript_char(inp: char) -> Option<char> {
         'ϕ' => Some('ᶲ'),
         'φ' => Some('ᵠ'),
         'χ' => Some('ᵡ'),
+        // already raised, or without a raised form but needed for legibility
+        c @ ('′' | ',') => Some(c),
         c if c.is_whitespace() => Some(c),
         _ => None,
     }
@@ -215,6 +217,8 @@ pub fn subscript_char(inp: char) -> Option<char> {
         'ρ' => Some('ᵨ'),
         'φ' => Some('ᵩ'),
         'χ' => Some('ᵪ'),
+        // no subscript form, but needed to separate indices
+        ',' => Some(','),
         c if c.is_whitespace() => Some(c),
         _ => None,
     }
@@ -369,7 +373,7 @@ pub fn symbol_str(inp: &str, skin_tone: SkinTone) -> &str {
         ":'" | "because" => "∵",
         "/_" | "angle" => "∠",
         "/_\\" | "triangle" => "△",
-        "'" | "prime" => "'",
+        "'" | "prime" => "′",
         "\\ " | "quad" | "qquad" => " ",
         "frown" => "⌢",
         "cdots" => "⋯",
