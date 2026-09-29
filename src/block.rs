@@ -801,7 +801,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_tests_still_pass_inline() {
+    fn default_layout_stays_inline() {
         let conf = Conf::default();
         let res = conf.parse("sum_(i=1)^n i^3=((n(n+1))/2)^2").to_string();
         assert_eq!(res, "∑ᵢ₌₁ⁿ i³=(ⁿ⁽ⁿ⁺¹⁾⁄₂)²");
@@ -816,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn conf_block_true_uses_block_rendering() {
+    fn block_layout_uses_block_rendering() {
         let conf = Conf {
             layout: Layout::Block,
             ..Default::default()

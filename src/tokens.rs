@@ -661,24 +661,31 @@ mod tests {
 
     #[test]
     fn mapping() {
+        // the tokens whose unicode form is the token itself
+        const WRITTEN_AS_TYPED: [&str; 17] = [
+            "/", "^", "_", ",", "=", "<", ">", "and", "or", "if", "(", "[", "{", ")", "]", "}", "|",
+        ];
         for (string, tok) in UNICODE_TOKENS {
-            match tok {
-                Token::OpenBracket => {
-                    super::left_bracket_str(string);
-                }
-                Token::CloseBracket => {
-                    super::right_bracket_str(string);
-                }
+            let mapped = match tok {
+                Token::OpenBracket => super::left_bracket_str(string),
+                Token::CloseBracket => super::right_bracket_str(string),
                 Token::OpenCloseBracket => {
-                    super::left_bracket_str(string);
-                    super::right_bracket_str(string);
-                    super::symbol_str(string, SkinTone::Default);
+                    assert_eq!(
+                        super::left_bracket_str(string),
+                        super::right_bracket_str(string),
+                        "{string:?} differs by side"
+                    );
+                    super::symbol_str(string, SkinTone::Default)
                 }
                 Token::Symbol | Token::Frac | Token::Super | Token::Sub | Token::Sep => {
-                    super::symbol_str(string, SkinTone::Default);
+                    super::symbol_str(string, SkinTone::Default)
                 }
-                _ => {}
-            }
+                _ => continue,
+            };
+            assert!(
+                mapped != string || WRITTEN_AS_TYPED.contains(&string),
+                "{string:?} has no unicode form"
+            );
         }
     }
 
@@ -714,7 +721,10 @@ mod tests {
                     super::sans_map,
                     super::mono_map,
                 ] {
-                    new_chars.insert(func(chr));
+                    let styled = func(chr);
+                    // a font it already applied must leave the char alone
+                    assert_eq!(func(styled), styled, "{chr:?} restyled to {styled:?}");
+                    new_chars.insert(styled);
                 }
             }
             chars = new_chars;
