@@ -401,10 +401,13 @@ pub fn symbol_str(inp: &str, skin_tone: SkinTone) -> &str {
         "harr" | "leftrightarrow" | "<->" => "↔",
         "lArr" | "Leftarrow" | "<==" => "⇐",
         // emoji
-        chr => {
-            let emoji = emojis::get_by_shortcode(&chr[1..chr.len() - 1]).unwrap();
-            emoji.with_skin_tone(skin_tone).unwrap_or(emoji).as_str()
-        }
+        other => other
+            .strip_prefix(':')
+            .and_then(|code| code.strip_suffix(':'))
+            .and_then(emojis::get_by_shortcode)
+            .map_or(other, |emoji| {
+                emoji.with_skin_tone(skin_tone).unwrap_or(emoji).as_str()
+            }),
     }
 }
 
@@ -663,6 +666,17 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    #[test]
+    fn unknown_symbol_passes_through() {
+        assert_eq!(super::symbol_str("", SkinTone::Default), "");
+        assert_eq!(super::symbol_str("x", SkinTone::Default), "x");
+        assert_eq!(
+            super::symbol_str(":notanemoji:", SkinTone::Default),
+            ":notanemoji:"
+        );
+        assert_eq!(super::symbol_str(":hand:", SkinTone::Default), "✋");
     }
 
     #[test]
