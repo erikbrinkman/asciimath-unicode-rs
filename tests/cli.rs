@@ -99,3 +99,25 @@ fn skin_tone() {
     assert_eq!(run(&["--skin-tone", "medium-dark"], ":hand:"), "✋🏾\n");
     assert_eq!(run(&["--skin-tone", "dark"], ":hand:"), "✋🏿\n");
 }
+
+#[test]
+fn non_utf8_input_fails_cleanly() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_asciimath-unicode"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn binary");
+    child
+        .stdin
+        .take()
+        .expect("stdin not piped")
+        .write_all(&[0xff, 0xfe])
+        .expect("failed to write stdin");
+    let output = child.wait_with_output().expect("failed to wait on binary");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr).expect("stderr was not utf-8");
+    assert!(!stderr.is_empty());
+    assert!(!stderr.contains("panicked"), "binary panicked: {stderr}");
+}

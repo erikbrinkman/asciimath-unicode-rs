@@ -2,6 +2,7 @@ use asciimath_unicode::{Conf, SkinTone};
 use clap::{Parser, ValueEnum};
 use std::io;
 use std::io::{Read, Write};
+use std::process;
 
 #[derive(Debug, Clone, ValueEnum)]
 enum Tone {
@@ -66,12 +67,18 @@ impl From<Args> for Conf {
 fn main() {
     let conf: Conf = Args::parse().into();
     let mut inp = String::new();
-    io::stdin().lock().read_to_string(&mut inp).unwrap();
+    if let Err(err) = io::stdin().lock().read_to_string(&mut inp) {
+        eprintln!("{err}");
+        process::exit(1);
+    }
     let mut out = io::stdout().lock();
     // a closed pipe (e.g. `| head`) is normal, not an error
-    if let Err(err) = write!(out, "{}", conf.parse(&inp)).and_then(|()| writeln!(out))
+    if let Err(err) = write!(out, "{}", conf.parse(&inp))
+        .and_then(|()| writeln!(out))
+        .and_then(|()| out.flush())
         && err.kind() != io::ErrorKind::BrokenPipe
     {
-        panic!("failed to write output: {err}");
+        eprintln!("{err}");
+        process::exit(1);
     }
 }
