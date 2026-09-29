@@ -4,6 +4,7 @@ use std::{fmt, iter};
 use unicode_width::UnicodeWidthStr;
 
 use super::Conf;
+use super::ast::{func_hugs_argument, hugs_argument, is_spaced_operator, needs_space};
 use super::inline::{Mapper, MapperConf};
 use super::tokens::{left_bracket_str, right_bracket_str, subscript_char, superscript_char};
 
@@ -280,128 +281,6 @@ fn tall_bracket_right(bracket: &str, height: usize) -> Block {
     }
 }
 
-#[allow(clippy::too_many_lines)]
-fn is_spaced_operator(sym: &str) -> bool {
-    matches!(
-        sym,
-        "+" | "-"
-            | "="
-            | "!="
-            | "ne"
-            | "<"
-            | "lt"
-            | "<="
-            | "le"
-            | "lt="
-            | "leq"
-            | ">"
-            | "gt"
-            | ">="
-            | "ge"
-            | "gt="
-            | "geq"
-            | "mlt"
-            | "ll"
-            | "mgt"
-            | "gg"
-            | "-<"
-            | "prec"
-            | "-lt"
-            | ">-"
-            | "succ"
-            | "-<="
-            | "preceq"
-            | ">-="
-            | "succeq"
-            | "in"
-            | "!in"
-            | "notin"
-            | "sub"
-            | "subset"
-            | "sup"
-            | "supset"
-            | "sube"
-            | "subseteq"
-            | "supe"
-            | "supseteq"
-            | "-="
-            | "equiv"
-            | "~="
-            | "cong"
-            | "~~"
-            | "approx"
-            | "~"
-            | "sim"
-            | "prop"
-            | "propto"
-            | "=>"
-            | "implies"
-            | "<=>"
-            | "iff"
-            | "AA"
-            | "forall"
-            | "EE"
-            | "exists"
-            | "|--"
-            | "vdash"
-            | "|=="
-            | "models"
-            | "and"
-            | "or"
-            | "if"
-            | "+-"
-            | "pm"
-            | "-+"
-            | "mp"
-            | "xx"
-            | "times"
-            | "-:"
-            | "div"
-            | "divide"
-            | "*"
-            | "cdot"
-            | "**"
-            | "ast"
-            | "o+"
-            | "oplus"
-            | "ox"
-            | "otimes"
-            | "o."
-            | "odot"
-            | "^^"
-            | "wedge"
-            | "land"
-            | "vv"
-            | "vee"
-            | "lor"
-            | "nn"
-            | "cap"
-            | "uu"
-            | "cup"
-            | "rarr"
-            | "rightarrow"
-            | "->"
-            | "to"
-            | "larr"
-            | "leftarrow"
-            | "<-"
-            | "harr"
-            | "leftrightarrow"
-            | "<->"
-            | "rArr"
-            | "Rightarrow"
-            | "==>"
-            | "lArr"
-            | "Leftarrow"
-            | "<=="
-            | "hArr"
-            | "Leftrightarrow"
-            | "<==>"
-            | "|->"
-            | "mapsto"
-    )
-}
-
 fn is_spaced_ident(id: &str) -> bool {
     matches!(id, "+" | "-" | "=" | ">" | "<" | "≤" | "≥" | "≠")
 }
@@ -429,20 +308,31 @@ impl Conf {
     }
 
     pub(crate) fn block_expression(self, expr: &Expression<'_>) -> Block {
-        let mut items = expr.iter();
-        let Some(first) = items.next() else {
+        // an item that renders to nothing, like an empty group, must not leave a space behind
+        let mut items = expr
+            .iter()
+            .map(|inter| (inter, self.block_intermediate(inter)))
+            .filter(|(_, block)| block.width > 0);
+        let Some((first, first_block)) = items.next() else {
             return Block::empty();
         };
-        let mut result = self.block_intermediate(first);
-        for inter in items {
-            let block = self.block_intermediate(inter);
+        let mut result = first_block;
+        let mut prev = first;
+        let mut spaced_after_prev = false;
+        for (inter, block) in items {
             if inter_is_spaced_op(inter) {
                 result = result.beside(Block::space(1));
                 result = result.beside(block);
                 result = result.beside(Block::space(1));
+                spaced_after_prev = true;
             } else {
+                if !spaced_after_prev && needs_space(prev, inter) {
+                    result = result.beside(Block::space(1));
+                }
                 result = result.beside(block);
+                spaced_after_prev = false;
             }
+            prev = inter;
         }
         result
     }
@@ -560,11 +450,10 @@ impl Conf {
 
     fn block_simplefunc(self, func: &SimpleFunc<'_>) -> Block {
         let name = Block::text(func.func);
-        // a bare function name has a missing argument and takes no separator
-        if matches!(func.arg(), Simple::Missing) {
-            name
+        let arg = self.block_simple(func.arg());
+        if hugs_argument(func.arg()) {
+            name.beside(arg)
         } else {
-            let arg = self.block_simple(func.arg());
             name.beside(Block::space(1)).beside(arg)
         }
     }
@@ -740,15 +629,10 @@ impl Conf {
     fn block_func(self, func: &Func<'_>) -> Block {
         let name = Block::text(func.func);
         let name_with_script = self.block_apply_script(name, &func.script);
-        // a bare function name (e.g. `f`, `g`) has a missing argument and takes no separator
-        if let ScriptFunc::Simple(SimpleScript {
-            simple: Simple::Missing,
-            ..
-        }) = func.arg()
-        {
-            name_with_script
+        let arg = self.block_scriptfunc(func.arg());
+        if func_hugs_argument(func) {
+            name_with_script.beside(arg)
         } else {
-            let arg = self.block_scriptfunc(func.arg());
             name_with_script.beside(Block::space(1)).beside(arg)
         }
     }
@@ -952,7 +836,7 @@ mod tests {
     fn existing_tests_still_pass_inline() {
         let conf = Conf::default();
         let res = conf.parse("sum_(i=1)^n i^3=((n(n+1))/2)^2").to_string();
-        assert_eq!(res, "∑ᵢ₌₁ⁿi³=(ⁿ⁽ⁿ⁺¹⁾⁄₂)²");
+        assert_eq!(res, "∑ᵢ₌₁ⁿ i³=(ⁿ⁽ⁿ⁺¹⁾⁄₂)²");
     }
 
     #[test]
@@ -1143,7 +1027,16 @@ mod tests {
     fn applied_identifier_in_stacked_frac() {
         // numerator and denominator are identifiers applied to bracketed arguments
         let result = render_block_conf("f(x)/g(y)", stacked());
-        assert_eq!(result, "f (x)\n─────\ng (y)");
+        assert_eq!(result, "f(x)\n────\ng(y)");
+    }
+
+    #[test]
+    fn block_word_spacing() {
+        assert_eq!(render_block("sin(x)"), "sin(x)");
+        assert_eq!(render_block("dx {: :} dy"), "dx dy");
+        assert_eq!(render_block("a mod b"), "a mod b");
+        assert_eq!(render_block("a and b"), "a and b");
+        assert_eq!(render_block("int_0^1 f(x) dx"), "∫₀¹ f(x) dx");
     }
 
     #[test]
