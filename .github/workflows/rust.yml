@@ -25,6 +25,10 @@ jobs:
       run: cargo build --verbose --all-features
     - name: Build without default features
       run: cargo build --verbose --no-default-features
+    - name: Install wasm32 target
+      run: rustup target add wasm32-unknown-unknown
+    - name: Build for wasm32
+      run: cargo build --verbose --target wasm32-unknown-unknown
     - name: Run tests with coverage
       run: cargo llvm-cov --verbose --all-features --fail-under-lines 90
     - name: Run lints
