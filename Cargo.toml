@@ -9,6 +9,7 @@ rust-version = "1.88"
 documentation = "https://docs.rs/asciimath-unicode"
 keywords = ["asciimath", "unicode", "math", "converter"]
 categories = ["text-processing", "mathematics"]
+include = ["/src", "/tests", "/README.md", "/LICENSE"]
 
 [[bin]]
 name = "asciimath-unicode"
@@ -23,6 +24,3 @@ clap = { version = "4.1", optional = true, features = ["derive", "wrap_help"] }
 emojis = "0.9"
 unicode-normalization = "0.1"
 unicode-width = "0.2"
-
-[dev-dependencies]
-rand = "0.10"
