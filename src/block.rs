@@ -135,8 +135,10 @@ impl Block {
         if left.is_empty() && right.is_empty() {
             self
         } else {
-            let left_col = tall_bracket_left(left, self.height()).with_baseline(self.baseline);
-            let right_col = tall_bracket_right(right, self.height()).with_baseline(self.baseline);
+            let left_col =
+                tall_bracket(left, self.height(), left_bracket_pieces).with_baseline(self.baseline);
+            let right_col = tall_bracket(right, self.height(), right_bracket_pieces)
+                .with_baseline(self.baseline);
             let new_baseline = self.height() / 2;
             left_col
                 .beside(self)
@@ -239,52 +241,40 @@ fn center_pad(s: &str, current_width: usize, target_width: usize) -> String {
     }
 }
 
-fn tall_bracket_left(bracket: &str, height: usize) -> Block {
-    if bracket.is_empty() {
-        Block {
-            lines: vec![String::new(); height],
-            baseline: height / 2,
-            width: 0,
-        }
-    } else if height <= 1 {
-        Block::text(bracket)
-    } else {
-        let (top, mid_top, mid_bot, bot, fill) = match bracket {
-            "(" | "left(" => ('⎛', '⎜', '⎜', '⎝', '⎜'),
-            "[" | "left[" => ('⎡', '⎢', '⎢', '⎣', '⎢'),
-            "⟨" | "(:" | "langle" | "<<" => ('╱', '⎜', '⎜', '╲', '⎜'),
-            "⌊" | "|__" | "lfloor" => ('⎢', '⎢', '⎢', '⌊', '⎢'),
-            "⌈" | "|~" | "lceiling" => ('⌈', '⎢', '⎢', '⎢', '⎢'),
-            "{" if height == 2 => ('⎰', ' ', ' ', '⎱', ' '),
-            "{" if height.is_multiple_of(2) => ('⎧', '⎭', '⎫', '⎩', '⎪'),
-            "{" => ('⎧', '⎪', '⎨', '⎩', '⎪'),
-            // "|", "|:", and anything else
-            _ => ('│', '│', '│', '│', '│'),
-        };
-        let mut lines = Vec::with_capacity(height);
-        lines.push(top.to_string());
-        for idx in 1..height - 1 {
-            lines.push(
-                if idx == height / 2 {
-                    mid_bot
-                } else if idx == height / 2 - 1 {
-                    mid_top
-                } else {
-                    fill
-                }
-                .to_string(),
-            );
-        }
-        lines.push(bot.to_string());
-        Block {
-            lines,
-            baseline: height / 2,
-            width: 1,
-        }
+/// Glyphs for a tall bracket: top, the two middle rows, bottom, and the fill between them
+type BracketPieces = (char, char, char, char, char);
+
+fn left_bracket_pieces(bracket: &str, height: usize) -> BracketPieces {
+    match bracket {
+        "(" | "left(" => ('⎛', '⎜', '⎜', '⎝', '⎜'),
+        "[" | "left[" => ('⎡', '⎢', '⎢', '⎣', '⎢'),
+        "⟨" | "(:" | "langle" | "<<" => ('╱', '⎜', '⎜', '╲', '⎜'),
+        "⌊" | "|__" | "lfloor" => ('⎢', '⎢', '⎢', '⌊', '⎢'),
+        "⌈" | "|~" | "lceiling" => ('⌈', '⎢', '⎢', '⎢', '⎢'),
+        "{" if height == 2 => ('⎰', ' ', ' ', '⎱', ' '),
+        "{" if height.is_multiple_of(2) => ('⎧', '⎭', '⎫', '⎩', '⎪'),
+        "{" => ('⎧', '⎪', '⎨', '⎩', '⎪'),
+        // "|", "|:", and anything else
+        _ => ('│', '│', '│', '│', '│'),
     }
 }
 
-fn tall_bracket_right(bracket: &str, height: usize) -> Block {
+fn right_bracket_pieces(bracket: &str, height: usize) -> BracketPieces {
+    match bracket {
+        ")" | "right)" => ('⎞', '⎟', '⎟', '⎠', '⎟'),
+        "]" | "right]" => ('⎤', '⎥', '⎥', '⎦', '⎥'),
+        "⟩" | ":)" | "rangle" | ">>" => ('╲', '⎟', '⎟', '╱', '⎟'),
+        "⌋" | "__|" | "rfloor" => ('⎥', '⎥', '⎥', '⌋', '⎥'),
+        "⌉" | "~|" | "rceiling" => ('⌉', '⎥', '⎥', '⎥', '⎥'),
+        "}" if height == 2 => ('⎱', ' ', ' ', '⎰', ' '),
+        "}" if height.is_multiple_of(2) => ('⎫', '⎩', '⎧', '⎭', '⎪'),
+        "}" => ('⎫', '⎪', '⎬', '⎭', '⎪'),
+        // "|", ":|", and anything else
+        _ => ('│', '│', '│', '│', '│'),
+    }
+}
+
+fn tall_bracket(bracket: &str, height: usize, pieces: fn(&str, usize) -> BracketPieces) -> Block {
     if bracket.is_empty() {
         Block {
             lines: vec![String::new(); height],
@@ -294,33 +284,23 @@ fn tall_bracket_right(bracket: &str, height: usize) -> Block {
     } else if height <= 1 {
         Block::text(bracket)
     } else {
-        let (top, mid_top, mid_bot, bot, fill) = match bracket {
-            ")" | "right)" => ('⎞', '⎟', '⎟', '⎠', '⎟'),
-            "]" | "right]" => ('⎤', '⎥', '⎥', '⎦', '⎥'),
-            "⟩" | ":)" | "rangle" | ">>" => ('╲', '⎟', '⎟', '╱', '⎟'),
-            "⌋" | "__|" | "rfloor" => ('⎥', '⎥', '⎥', '⌋', '⎥'),
-            "⌉" | "~|" | "rceiling" => ('⌉', '⎥', '⎥', '⎥', '⎥'),
-            "}" if height == 2 => ('⎱', ' ', ' ', '⎰', ' '),
-            "}" if height.is_multiple_of(2) => ('⎫', '⎩', '⎧', '⎭', '⎪'),
-            "}" => ('⎫', '⎪', '⎬', '⎭', '⎪'),
-            // "|", ":|", and anything else
-            _ => ('│', '│', '│', '│', '│'),
-        };
-        let mut lines = Vec::with_capacity(height);
-        lines.push(top.to_string());
-        for idx in 1..height - 1 {
-            lines.push(
-                if idx == height / 2 {
+        let (top, mid_top, mid_bot, bot, fill) = pieces(bracket, height);
+        let lines = (0..height)
+            .map(|idx| {
+                if idx == 0 {
+                    top
+                } else if idx == height - 1 {
+                    bot
+                } else if idx == height / 2 {
                     mid_bot
                 } else if idx == height / 2 - 1 {
                     mid_top
                 } else {
                     fill
                 }
-                .to_string(),
-            );
-        }
-        lines.push(bot.to_string());
+                .to_string()
+            })
+            .collect();
         Block {
             lines,
             baseline: height / 2,
