@@ -9,7 +9,10 @@ use std::fmt::Write;
 use unicode_normalization::char::compose;
 
 use super::Conf;
-use super::ast::{extract_vulgar_frac, paren_contents, unwrap_parens};
+use super::ast::{
+    extract_vulgar_frac, func_hugs_argument, hugs_argument, needs_space, paren_contents,
+    unwrap_parens,
+};
 use super::tokens::{
     bold_map, cal_map, double_map, frak_map, italic_map, left_bracket_str, mono_map,
     right_bracket_str, sans_map, subscript_char, superscript_char, symbol_str,
@@ -251,8 +254,7 @@ impl Conf {
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
         out.write_str(simple.func)?;
-        // a bare function name has a missing argument and takes no separator
-        if !matches!(simple.arg(), Simple::Missing) {
+        if !hugs_argument(simple.arg()) {
             out.write_char(' ')?;
         }
         self.inline_simple(simple.arg(), out)
@@ -607,13 +609,7 @@ impl Conf {
     fn inline_func(self, func: &Func<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
         out.write_str(func.func)?;
         self.inline_script(&func.script, out)?;
-        // a bare function name (e.g. `f`, `g`) has a missing argument and takes no separator
-        if let ScriptFunc::Simple(SimpleScript {
-            simple: Simple::Missing,
-            ..
-        }) = func.arg()
-        {
-        } else {
+        if !func_hugs_argument(func) {
             out.write_char(' ')?;
         }
         self.inline_scriptfunc(func.arg(), out)
@@ -764,8 +760,21 @@ impl Conf {
         expr: &Expression<'_>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
+        let mut prev = None;
         for inter in expr.iter() {
-            self.inline_intermediate(inter, out)?;
+            // an item that renders to nothing, like an empty group, must not leave a space behind
+            let mut text = String::new();
+            self.inline_intermediate(inter, &mut out.onto(&mut text))?;
+            if text.is_empty() {
+                continue;
+            }
+            if let Some(prev) = prev
+                && needs_space(prev, inter)
+            {
+                out.write_char(' ')?;
+            }
+            out.inner.write_str(&text)?;
+            prev = Some(inter);
         }
         Ok(())
     }
@@ -778,7 +787,7 @@ mod tests {
     #[test]
     fn example() {
         let ex = "sum_(i=1)^n i^3=((n(n+1))/2)^2";
-        let expected = "∑ᵢ₌₁ⁿi³=(ⁿ⁽ⁿ⁺¹⁾⁄₂)²";
+        let expected = "∑ᵢ₌₁ⁿ i³=(ⁿ⁽ⁿ⁺¹⁾⁄₂)²";
 
         let res = super::super::parse_unicode(ex).to_string();
         assert_eq!(res, expected);
@@ -1407,6 +1416,40 @@ mod tests {
         // a bare (ungrouped) symbol argument takes the combining modifier directly
         let res = super::super::parse_unicode("vec*").to_string();
         assert_eq!(res, "\u{22c5}\u{20d7}");
+    }
+
+    #[test]
+    fn word_spacing() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        // a function touches a bracketed argument and is spaced from a bare one
+        assert_eq!(render("sin(x)"), "sin(x)");
+        assert_eq!(render("f(x)"), "f(x)");
+        assert_eq!(render("f'(x)"), "f'(x)");
+        assert_eq!(render("sin^2(x)"), "sin²(x)");
+        assert_eq!(render("sin x"), "sin x");
+        assert_eq!(render("log_2 x"), "log₂ x");
+        assert_eq!(render("min(a,b)"), "min(a,b)");
+        // words stay separated from neighboring operands
+        assert_eq!(render("a mod b"), "a mod b");
+        assert_eq!(render("a and b"), "a and b");
+        assert_eq!(render("x>0 or x<1"), "x>0 or x<1");
+        assert_eq!(render("2 sin x"), "2 sin x");
+        assert_eq!(render("sin x cos x"), "sin x cos x");
+        assert_eq!(render("x max(a,b)"), "x max(a,b)");
+        assert_eq!(render("x dx"), "x dx");
+        // a big operator with scripts is separated from its operand; a bare one is not
+        assert_eq!(render("int_0^1 f(x) dx"), "∫₀¹ f(x) dx");
+        assert_eq!(render("lim_(x->0) f(x)"), "lim_(x→0) f(x)");
+        assert_eq!(render("sum_i x_i"), "∑ᵢ xᵢ");
+        assert_eq!(render("sum x_i"), "∑xᵢ");
+        assert_eq!(render("int f dx"), "∫f dx");
+        // an item that renders to nothing leaves no space behind
+        assert_eq!(render("dx {: :} dy"), "dx dy");
+        assert_eq!(render("dx \"\" dy"), "dx dy");
+        // operators stay tight
+        assert_eq!(render("x = -1"), "x=-1");
+        assert_eq!(render("f(x)=x^2"), "f(x)=x²");
+        assert_eq!(render("a b"), "ab");
     }
 
     #[test]

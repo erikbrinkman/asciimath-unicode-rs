@@ -346,9 +346,9 @@ pub fn symbol_str(inp: &str, skin_tone: SkinTone) -> &str {
         "TT" | "top" => "⊤",
         "|--" | "vdash" => "⊢",
         "|==" | "models" => "⊨",
-        "and" => " and ",
-        "or" => " or ",
-        "if" => " if ",
+        "and" => "and",
+        "or" => "or",
+        "if" => "if",
         // misc
         ":|:" | "|" => "|",
         "int" => "∫",
