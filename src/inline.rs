@@ -331,10 +331,7 @@ impl Conf {
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
         out.write_str(simple.func)?;
-        if !hugs_argument(simple.arg()) {
-            out.write_char(' ')?;
-        }
-        self.inline_simple(simple.arg(), out)
+        self.inline_applied_arg(simple.arg(), hugs_argument(simple.arg()), out)
     }
 
     fn inline_root(
@@ -391,6 +388,22 @@ impl Conf {
         }
     }
 
+    /// A space separates the name from its argument unless the argument hugs it or renders to
+    /// nothing
+    fn inline_applied_arg<'a>(
+        self,
+        arg: &impl Operand<'a>,
+        hugs: bool,
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
+        let mut text = String::new();
+        arg.inline_as_written(self, &mut out.onto(&mut text))?;
+        if !hugs && !text.is_empty() {
+            out.write_char(' ')?;
+        }
+        out.inner.write_str(&text)
+    }
+
     fn inline_bgeneric(
         self,
         op: &str,
@@ -399,10 +412,8 @@ impl Conf {
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
         out.write_str(op)?;
-        out.write_char(' ')?;
-        self.inline_simple(first, out)?;
-        out.write_char(' ')?;
-        self.inline_simple(second, out)
+        self.inline_applied_arg(first, false, out)?;
+        self.inline_applied_arg(second, false, out)
     }
 
     fn inline_overset(
@@ -518,8 +529,7 @@ impl Conf {
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
         out.write_str(op)?;
-        out.write_char(' ')?;
-        self.inline_simple(arg, out)
+        self.inline_applied_arg(arg, false, out)
     }
 
     pub(crate) fn inline_simpleunary(
@@ -708,10 +718,7 @@ impl Conf {
     fn inline_func(self, func: &Func<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
         out.write_str(func.func)?;
         self.inline_script(&func.script, out)?;
-        if !func_hugs_argument(func) {
-            out.write_char(' ')?;
-        }
-        self.inline_scriptfunc(func.arg(), out)
+        self.inline_applied_arg(func.arg(), func_hugs_argument(func), out)
     }
 
     fn inline_scriptfunc(
@@ -1629,5 +1636,13 @@ mod tests {
         // `x^` leaves the script base `Simple::Missing`, which renders to nothing
         let res = super::super::parse_unicode("x^").to_string();
         assert_eq!(res, "x");
+    }
+
+    #[test]
+    fn nothing_to_render_leaves_no_space() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("hat"), "hat"); // a command with no argument
+        assert_eq!(render("g ubrace"), "g"); // an argument that renders to nothing
+        assert_eq!(render("dx g obrace() dy"), "dx g dy");
     }
 }
