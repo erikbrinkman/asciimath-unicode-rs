@@ -912,6 +912,13 @@ mod tests {
     }
 
     #[test]
+    fn block_prefix_minus_and_text() {
+        assert_eq!(render_block("a !-= -b"), "a ≢ -b");
+        assert_eq!(render_block("x^-1"), "x⁻¹");
+        assert_eq!(render_block("text(hello world)"), "hello world");
+    }
+
+    #[test]
     fn block_script_brackets_stripped() {
         assert_eq!(render_block("x_(2i)"), "x₂ᵢ");
         assert_eq!(render_block("sum_(i=1)^n i"), "∑ᵢ₌₁ⁿ i");

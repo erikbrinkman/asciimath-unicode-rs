@@ -19,7 +19,7 @@ macro_rules! tokens {
     };
 }
 
-const UNICODE_TOKENS: [(&str, Token); 399] = tokens!(
+const UNICODE_TOKENS: [(&str, Token); 425] = tokens!(
     Frac => "/";
     Super => "^";
     Sub => "_";
@@ -27,13 +27,14 @@ const UNICODE_TOKENS: [(&str, Token); 399] = tokens!(
     Function => "sin", "cos", "tan", "sinh", "cosh", "tanh", "cot", "sec", "csc", "arcsin",
         "arccos", "arctan", "coth", "sech", "csch", "exp", "log", "ln", "det", "gcd", "lcm", "Sin",
         "Cos", "Tan", "Arcsin", "Arccos", "Arctan", "Sinh", "Cosh", "Tanh", "Cot", "Sec", "Csc",
-        "Log", "Ln", "f", "g";
+        "Log", "Ln", "f", "g", "arcsec", "arccsc", "arccot";
     Unary => "sqrt", "abs", "norm", "floor", "ceil", "Abs", "hat", "bar", "overline", "vec", "dot",
         "ddot", "overarc", "overparen", "ul", "underline", "ubrace", "underbrace", "obrace",
         "overbrace", "text", "mbox", "cancel", "tilde";
     // font commands
     Unary => "bb", "mathbf", "sf", "mathsf", "bbb", "mathbb", "cc", "mathcal", "tt", "mathtt",
-        "fr", "mathfrak", "it", "mathit";
+        "fr", "mathfrak", "it", "mathit", "italic", "bold", "bbit", "bbsf", "sfit", "bbsfit", "bbcc",
+        "bbfr";
     Binary => "frac", "root", "stackrel", "overset", "underset", "color", "id", "class";
     // greek symbols
     Symbol => "alpha", "Alpha", "beta", "Beta", "chi", "Chi", "delta", "Delta", "epsi", "Epsi",
@@ -47,14 +48,15 @@ const UNICODE_TOKENS: [(&str, Token); 399] = tokens!(
         "times", "|><", "ltimes", "><|", "rtimes", "|><|", "bowtie", "-:", "div", "divide", "@",
         "circ", "o+", "oplus", "ox", "otimes", "o.", "odot", "sum", "prod", "^^", "wedge", "land",
         "^^^", "bigwedge", "vv", "vee", "lor", "vvv", "bigvee", "nn", "cap", "nnn", "bigcap", "uu",
-        "cup", "uuu", "bigcup", "ominus", "oslash";
+        "cup", "uuu", "bigcup", "ominus", "o-", "oslash", "dag", "dagger", "ddag", "ddagger";
     // relations
     Symbol => "=", "!=", "ne", "<", "lt", "<=", "le", "lt=", "leq", ">", "gt", "mlt", "ll", ">=", "ge",
         "gt=", "geq", "mgt", "gg", "-<", "prec", "-lt", ">-", "succ", "-<=", "preceq", ">-=",
         "succeq", "in", "!in", "notin", "sub", "subset", "sup", "supset", "sube", "subseteq",
         "supe", "supseteq",
-        "!sub", "nsub", "!sup", "nsup", "!sube", "nsubseteq", "!supe", "nsupseteq",
-        "-=", "equiv", "~=", "cong", "~~", "approx", "~", "sim",
+        "!sub", "nsub", "notsubset", "!sup", "nsup", "notsupset", "!sube", "nsubseteq",
+        "notsubseteq", "!supe", "nsupseteq", "notsupseteq",
+        "-=", "equiv", "!-=", "notequiv", "~=", "cong", "~~", "approx", "~", "sim",
         "prop", "propto";
     // logical
     Symbol => "not", "neg", "=>", "implies", "<=>", "iff", "AA", "forall", "EE", "exists", "!EE",
@@ -66,13 +68,13 @@ const UNICODE_TOKENS: [(&str, Token); 399] = tokens!(
         "O/", "emptyset", "oo", "infty", "aleph", "...", "ldots", ":.", "therefore", ":'",
         "because", "/_", "angle", "/_\\", "triangle", "'", "prime", "\\ ", "frown",
         "quad", "qquad", "cdots", "vdots", "ddots", "diamond", "square", "CC", "NN", "QQ", "RR",
-        "ZZ", "ell";
+        "ZZ", "ell", "hbar", "enspace", "thinspace";
     // arrows
     Symbol => "uarr", "uparrow", "uArr", "Uparrow", "darr", "downarrow", "dArr", "Downarrow",
         "rarr", "rightarrow", "->", "to", ">->",
         "rightarrowtail", "->>", "twoheadrightarrow", ">->>", "twoheadrightarrowtail", "|->",
         "mapsto", "larr", "leftarrow", "<-", "harr", "leftrightarrow", "<->", "rArr", "Rightarrow",
-        "==>", "lArr", "Leftarrow","<==",  "hArr", "Leftrightarrow", "<==>";
+        "==>", "lArr", "Leftarrow","<==",  "hArr", "Leftrightarrow", "<==>", "rightleftharpoons";
     // brackets
     OpenBracket => "(", "[", "{", "|:", "(:", "<<", "langle", "left(", "left[", "{:", "|__",
         "lfloor", "|~", "lceiling";
@@ -309,8 +311,10 @@ pub fn symbol_str(inp: &str, skin_tone: SkinTone) -> &str {
         "nnn" | "bigcap" => "⋂",
         "uu" | "cup" => "∪",
         "uuu" | "bigcup" => "⋃",
-        "ominus" => "⊖",
+        "ominus" | "o-" => "⊖",
         "oslash" => "⊘",
+        "dag" | "dagger" => "†",
+        "ddag" | "ddagger" => "‡",
         // relations
         "=" => "=",
         "!=" | "ne" => "≠",
@@ -330,11 +334,12 @@ pub fn symbol_str(inp: &str, skin_tone: SkinTone) -> &str {
         "sup" | "supset" => "⊃",
         "sube" | "subseteq" => "⊆",
         "supe" | "supseteq" => "⊇",
-        "!sub" | "nsub" => "⊄",
-        "!sup" | "nsup" => "⊅",
-        "!sube" | "nsubseteq" => "⊈",
-        "!supe" | "nsupseteq" => "⊉",
+        "!sub" | "nsub" | "notsubset" => "⊄",
+        "!sup" | "nsup" | "notsupset" => "⊅",
+        "!sube" | "nsubseteq" | "notsubseteq" => "⊈",
+        "!supe" | "nsupseteq" | "notsupseteq" => "⊉",
         "-=" | "equiv" => "≡",
+        "!-=" | "notequiv" => "≢",
         "~=" | "cong" => "≅",
         "~~" | "approx" => "≈",
         "~" | "sim" => "~",
@@ -387,6 +392,9 @@ pub fn symbol_str(inp: &str, skin_tone: SkinTone) -> &str {
         "RR" => "ℝ",
         "ZZ" => "ℤ",
         "ell" => "ℓ",
+        "hbar" => "ℏ",
+        "enspace" => "\u{2002}",
+        "thinspace" => "\u{2009}",
         // arrows
         "uarr" | "uparrow" => "↑",
         "uArr" | "Uparrow" => "⇑",
@@ -400,6 +408,7 @@ pub fn symbol_str(inp: &str, skin_tone: SkinTone) -> &str {
         "larr" | "leftarrow" | "<-" => "←",
         "harr" | "leftrightarrow" | "<->" => "↔",
         "lArr" | "Leftarrow" | "<==" => "⇐",
+        "rightleftharpoons" => "⇌",
         // emoji
         other => other
             .strip_prefix(':')

@@ -139,6 +139,20 @@ pub fn is_spaced_operator(sym: &str) -> bool {
             | "subseteq"
             | "supe"
             | "supseteq"
+            | "!sub"
+            | "nsub"
+            | "notsubset"
+            | "!sup"
+            | "nsup"
+            | "notsupset"
+            | "!sube"
+            | "nsubseteq"
+            | "notsubseteq"
+            | "!supe"
+            | "nsupseteq"
+            | "notsupseteq"
+            | "!-="
+            | "notequiv"
             | "-="
             | "equiv"
             | "~="
@@ -214,6 +228,7 @@ pub fn is_spaced_operator(sym: &str) -> bool {
             | "<==>"
             | "|->"
             | "mapsto"
+            | "rightleftharpoons"
     )
 }
 
