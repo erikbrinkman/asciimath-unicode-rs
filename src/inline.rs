@@ -1645,4 +1645,25 @@ mod tests {
         assert_eq!(render("g ubrace"), "g"); // an argument that renders to nothing
         assert_eq!(render("dx g obrace() dy"), "dx g dy");
     }
+
+    #[test]
+    fn double_struck_greek() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("bbb(Gamma)"), "ℾ");
+        assert_eq!(render("bbb(Pi)"), "ℿ");
+        assert_eq!(render("bbb(gamma)"), "ℽ");
+        assert_eq!(render("bbb(pi)"), "ℼ");
+        assert_eq!(render("bbb(sum)"), "⅀");
+    }
+
+    #[test]
+    fn similar_and_wide_spaces() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("a~b"), "a∼b");
+        assert_eq!(render("a sim b"), "a∼b");
+        assert_eq!(render("a quad b"), "a\u{2003}b");
+        assert_eq!(render("a qquad b"), "a\u{2003}\u{2003}b");
+        // an escaped space stays one plain space
+        assert_eq!(render("a \\ b"), "a b");
+    }
 }
