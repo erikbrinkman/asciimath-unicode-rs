@@ -1,7 +1,7 @@
 #![allow(missing_docs, clippy::missing_errors_doc)]
 
 use asciimath_parser::tree::{
-    Expression, Frac, Func, Group, Intermediate, Matrix, Script, ScriptFunc, Simple, SimpleBinary,
+    Expression, Func, Group, Intermediate, Matrix, Script, ScriptFunc, Simple, SimpleBinary,
     SimpleFunc, SimpleScript, SimpleUnary,
 };
 use std::fmt;
@@ -17,15 +17,6 @@ use super::tokens::{
     bold_map, cal_map, double_map, frak_map, italic_map, left_bracket_str, mono_map,
     right_bracket_str, sans_map, subscript_char, superscript_char, symbol_str,
 };
-
-#[derive(Debug)]
-pub struct Sink;
-
-impl fmt::Write for Sink {
-    fn write_str(&mut self, _: &str) -> fmt::Result {
-        Ok(())
-    }
-}
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MapperConf {
@@ -100,6 +91,13 @@ impl<'a, W: fmt::Write + ?Sized> Mapper<'a, W> {
         }
     }
 
+    /// `chr` the way this mapper would write it, if it maps at all
+    pub fn mapped_char(&self, chr: char) -> Option<String> {
+        let mut text = String::new();
+        self.onto(&mut text).write_char(chr).ok()?;
+        Some(text)
+    }
+
     pub fn onto<'b, S: Write>(&self, other: &'b mut S) -> Mapper<'b, S> {
         Mapper {
             inner: other,
@@ -109,6 +107,8 @@ impl<'a, W: fmt::Write + ?Sized> Mapper<'a, W> {
 }
 
 impl<W: fmt::Write + ?Sized> fmt::Write for Mapper<'_, W> {
+    /// Only a mapper over a string is asked whether a rendering maps, so a char with no script
+    /// form failing here never looks like a real writer's error
     fn write_str(&mut self, s: &str) -> fmt::Result {
         if self.conf.font.is_none() && self.conf.sub_sup.is_none() && self.conf.modifier.is_none() {
             self.inner.write_str(s)
@@ -265,6 +265,49 @@ fn root_char(index: &Simple<'_>) -> Option<char> {
     }
 }
 
+/// One side of a fraction: a simple, possibly with a script or a function applied
+pub(crate) trait Operand<'a> {
+    /// The operand as a simple, if it carries no script
+    fn as_simple(&self) -> Option<&Simple<'a>>;
+
+    /// Render the operand with its grouping brackets dropped
+    fn inline_stripped<W: fmt::Write>(&self, conf: Conf, out: &mut Mapper<'_, W>) -> fmt::Result;
+
+    /// Render the operand as written, brackets and all
+    fn inline_as_written<W: fmt::Write>(&self, conf: Conf, out: &mut Mapper<'_, W>) -> fmt::Result;
+}
+
+impl<'a> Operand<'a> for Simple<'a> {
+    fn as_simple(&self) -> Option<&Simple<'a>> {
+        Some(self)
+    }
+
+    fn inline_stripped<W: fmt::Write>(&self, conf: Conf, out: &mut Mapper<'_, W>) -> fmt::Result {
+        conf.inline_simple_stripped(self, out)
+    }
+
+    fn inline_as_written<W: fmt::Write>(&self, conf: Conf, out: &mut Mapper<'_, W>) -> fmt::Result {
+        conf.inline_simple(self, out)
+    }
+}
+
+impl<'a> Operand<'a> for ScriptFunc<'a> {
+    fn as_simple(&self) -> Option<&Simple<'a>> {
+        match self {
+            script_func!(simple) => Some(simple),
+            _ => None,
+        }
+    }
+
+    fn inline_stripped<W: fmt::Write>(&self, conf: Conf, out: &mut Mapper<'_, W>) -> fmt::Result {
+        conf.inline_scriptfunc_stripped(self, out)
+    }
+
+    fn inline_as_written<W: fmt::Write>(&self, conf: Conf, out: &mut Mapper<'_, W>) -> fmt::Result {
+        conf.inline_scriptfunc(self, out)
+    }
+}
+
 impl Conf {
     pub(crate) fn stripped<'s, 'a>(self, simple: &'s Simple<'a>) -> Option<&'s Expression<'a>> {
         if self.strip_brackets {
@@ -315,11 +358,9 @@ impl Conf {
             let mut buf = [0; 4];
             self.inline_root(root.encode_utf8(&mut buf), radicand, out)
         } else if let Some(sup_conf) = out.conf.with_sup()
-            && self
-                .inline_simple_stripped(index, &mut sup_conf.wrap(&mut Sink))
-                .is_ok()
+            && let Some(text) = self.mapped_operand(index, sup_conf)
         {
-            self.inline_simple_stripped(index, &mut sup_conf.wrap(out.inner))?;
+            out.inner.write_str(&text)?;
             self.inline_root("√", radicand, out)
         } else {
             self.inline_bgeneric("root", index, radicand, out)
@@ -394,11 +435,14 @@ impl Conf {
     ) -> fmt::Result {
         match (simple.op, simple.first(), simple.second()) {
             ("root", index, radicand) => self.inline_nroot(index, radicand, out),
-            ("frac", numer, denom) => self.inline_simplefrac(numer, denom, out).or_else(|_| {
-                self.inline_simple(numer, out)?;
-                out.write_char('/')?;
-                self.inline_simple(denom, out)
-            }),
+            ("frac", numer, denom) => {
+                let compact = self.mapped_frac(numer, denom, out);
+                if let Some(text) = compact {
+                    out.inner.write_str(&text)
+                } else {
+                    self.inline_plain_frac(numer, denom, out)
+                }
+            }
             ("stackrel" | "overset", over, base) => self.inline_overset(over, base, out),
             ("underset", under, base) => {
                 self.inline_simple_stripped(base, out)?;
@@ -598,10 +642,15 @@ impl Conf {
         }
     }
 
-    /// `script` with its brackets stripped and every char mapped through `conf`, if all map
-    pub(crate) fn mapped_script(self, script: &Simple<'_>, conf: MapperConf) -> Option<String> {
+    /// `operand` with its brackets stripped and every char mapped through `conf`, if all map
+    pub(crate) fn mapped_operand<'a>(
+        self,
+        operand: &impl Operand<'a>,
+        conf: MapperConf,
+    ) -> Option<String> {
         let mut text = String::new();
-        self.inline_simple_stripped(script, &mut conf.wrap(&mut text))
+        operand
+            .inline_stripped(self, &mut conf.wrap(&mut text))
             .ok()?;
         Some(text)
     }
@@ -615,11 +664,9 @@ impl Conf {
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
         if let Some(sconf) = conf
-            && self
-                .inline_simple_stripped(script, &mut sconf.wrap(&mut Sink))
-                .is_ok()
+            && let Some(text) = self.mapped_operand(script, sconf)
         {
-            self.inline_simple_stripped(script, &mut sconf.wrap(out.inner))
+            out.inner.write_str(&text)
         } else {
             out.write_char(marker)?;
             self.inline_simple(script, out)
@@ -633,16 +680,12 @@ impl Conf {
             Script::Super(sup) => self.inline_sub_or_sup(sup, out.conf.with_sup(), '^', out),
             Script::Subsuper(sub, sup) => {
                 if let Some(sub_conf) = out.conf.with_sub()
-                    && self
-                        .inline_simple_stripped(sub, &mut sub_conf.wrap(&mut Sink))
-                        .is_ok()
+                    && let Some(lower) = self.mapped_operand(sub, sub_conf)
                     && let Some(sup_conf) = out.conf.with_sup()
-                    && self
-                        .inline_simple_stripped(sup, &mut sup_conf.wrap(&mut Sink))
-                        .is_ok()
+                    && let Some(upper) = self.mapped_operand(sup, sup_conf)
                 {
-                    self.inline_simple_stripped(sub, &mut sub_conf.wrap(out.inner))?;
-                    self.inline_simple_stripped(sup, &mut sup_conf.wrap(out.inner))
+                    out.inner.write_str(&lower)?;
+                    out.inner.write_str(&upper)
                 } else {
                     out.write_char('_')?;
                     self.inline_simple(sub, out)?;
@@ -693,109 +736,56 @@ impl Conf {
         }
     }
 
-    fn inline_sone(self, den: &Simple<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
-        if let Some(sconf) = out.conf.with_sub()
-            && self
-                .inline_simple_stripped(den, &mut sconf.wrap(&mut Sink))
-                .is_ok()
-        {
-            out.write_char('⅟')?;
-            self.inline_simple_stripped(den, &mut sconf.wrap(out.inner))
-        } else {
-            Err(fmt::Error)
-        }
-    }
-
-    pub(crate) fn inline_simplefrac(
+    /// `numer` over `denom` as a vulgar fraction, after `⅟`, or as a superscript over a
+    /// subscript, when one of those fits
+    fn mapped_frac<'a>(
         self,
-        numer: &Simple<'_>,
-        denom: &Simple<'_>,
-        out: &mut Mapper<impl fmt::Write>,
-    ) -> fmt::Result {
+        numer: &impl Operand<'a>,
+        denom: &impl Operand<'a>,
+        out: &Mapper<impl fmt::Write>,
+    ) -> Option<String> {
+        let numer_simple = numer.as_simple();
         if self.vulgar_fracs
-            && let Some(frac) = extract_vulgar_frac(numer, denom, self.strip_brackets)
+            && let Some(num) = numer_simple
+            && let Some(den) = denom.as_simple()
+            && let Some(frac) = extract_vulgar_frac(num, den, self.strip_brackets)
         {
-            out.write_char(frac)
+            out.mapped_char(frac)
         } else if self.vulgar_fracs
             && self.script_fracs()
-            && matches!(self.unwrap_single(numer), num!("1"))
-            && !is_negated(denom)
+            && matches!(
+                numer_simple.map(|num| self.unwrap_single(num)),
+                Some(num!("1"))
+            )
+            && !denom.as_simple().is_some_and(is_negated)
+            && let Some(sub_conf) = out.conf.with_sub()
+            && let Some(marker) = out.mapped_char('⅟')
+            && let Some(lower) = self.mapped_operand(denom, sub_conf)
         {
-            self.inline_sone(denom, out)
+            Some(marker + &lower)
         } else if self.script_fracs()
             && let Some(sup_conf) = out.conf.with_sup()
-            && self
-                .inline_simple_stripped(numer, &mut sup_conf.wrap(&mut Sink))
-                .is_ok()
+            && let Some(upper) = self.mapped_operand(numer, sup_conf)
             && let Some(sub_conf) = out.conf.with_sub()
-            && self
-                .inline_simple_stripped(denom, &mut sub_conf.wrap(&mut Sink))
-                .is_ok()
+            && let Some(slash) = out.mapped_char('⁄')
+            && let Some(lower) = self.mapped_operand(denom, sub_conf)
         {
-            self.inline_simple_stripped(numer, &mut sup_conf.wrap(out.inner))?;
-            out.write_char('⁄')?;
-            self.inline_simple_stripped(denom, &mut sub_conf.wrap(out.inner))
+            Some(upper + &slash + &lower)
         } else {
-            Err(fmt::Error)
+            None
         }
     }
 
-    fn inline_fone(self, den: &ScriptFunc<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
-        if let Some(sconf) = out.conf.with_sub()
-            && self
-                .inline_scriptfunc(den, &mut sconf.wrap(&mut Sink))
-                .is_ok()
-        {
-            out.write_char('⅟')?;
-            self.inline_scriptfunc(den, &mut sconf.wrap(out.inner))
-        } else {
-            Err(fmt::Error)
-        }
-    }
-
-    pub(crate) fn inline_frac(
+    /// Brackets stay: without them a slash makes the order of operations unclear
+    fn inline_plain_frac<'a>(
         self,
-        frac: &Frac<'_>,
+        numer: &impl Operand<'a>,
+        denom: &impl Operand<'a>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
-        match (&frac.numer, &frac.denom) {
-            (script_func!(num), script_func!(den)) => {
-                self.inline_simplefrac(num, den, out).or_else(|_| {
-                    self.inline_simple(num, out)?;
-                    out.write_char('/')?;
-                    self.inline_simple(den, out)
-                })
-            }
-            (script_func!(num), den)
-                if self.script_fracs()
-                    && self.vulgar_fracs
-                    && matches!(self.unwrap_single(num), num!("1"))
-                    && !matches!(den, script_func!(den) if is_negated(den)) =>
-            {
-                self.inline_fone(den, out).or_else(|_| {
-                    out.write_str("1/")?;
-                    self.inline_scriptfunc(den, out)
-                })
-            }
-            (num, den) => {
-                if self.script_fracs()
-                    && let Some(sup_conf) = out.conf.with_sup()
-                    && self
-                        .inline_scriptfunc_stripped(num, &mut sup_conf.wrap(&mut Sink))
-                        .is_ok()
-                    && let Some(sub_conf) = out.conf.with_sub()
-                    && self
-                        .inline_scriptfunc_stripped(den, &mut sub_conf.wrap(&mut Sink))
-                        .is_ok()
-                {
-                    self.inline_scriptfunc_stripped(num, &mut sup_conf.wrap(out.inner))?;
-                    out.write_char('⁄')?;
-                    self.inline_scriptfunc_stripped(den, &mut sub_conf.wrap(out.inner))
-                } else {
-                    Err(fmt::Error)
-                }
-            }
-        }
+        numer.inline_as_written(self, out)?;
+        out.write_char('/')?;
+        denom.inline_as_written(self, out)
     }
 
     fn inline_intermediate(
@@ -805,11 +795,14 @@ impl Conf {
     ) -> fmt::Result {
         match inter {
             Intermediate::ScriptFunc(sf) => self.inline_scriptfunc(sf, out),
-            Intermediate::Frac(frac) => self.inline_frac(frac, out).or_else(|_| {
-                self.inline_scriptfunc(&frac.numer, out)?;
-                out.write_char('/')?;
-                self.inline_scriptfunc(&frac.denom, out)
-            }),
+            Intermediate::Frac(frac) => {
+                let compact = self.mapped_frac(&frac.numer, &frac.denom, out);
+                if let Some(text) = compact {
+                    out.inner.write_str(&text)
+                } else {
+                    self.inline_plain_frac(&frac.numer, &frac.denom, out)
+                }
+            }
         }
     }
 
@@ -1499,7 +1492,7 @@ mod tests {
         // which fall back to plain `/` when the script blocks sub/superscripting
         let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("1/x^2"), "1/x²"); // one-over reciprocal
-        assert_eq!(render("(1)/x^2"), "1/x²"); // grouped one-over
+        assert_eq!(render("(1)/x^2"), "(1)/x²"); // grouped one-over
         assert_eq!(render("(x+a)/y^2"), "(x+a)/y²"); // grouped numerator
         assert_eq!(render("x^2/(x+a)"), "x²/(x+a)"); // grouped denominator
     }

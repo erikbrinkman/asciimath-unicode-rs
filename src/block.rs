@@ -5,7 +5,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::Conf;
 use super::ast::{func_hugs_argument, hugs_argument, is_spaced_operator, needs_space};
-use super::inline::{Mapper, MapperConf, column_rules};
+use super::inline::{Mapper, MapperConf, Operand, column_rules};
 use super::tokens::{left_bracket_str, right_bracket_str, subscript_char, superscript_char};
 
 use asciimath_parser::tree::{
@@ -416,17 +416,17 @@ impl Conf {
         };
         match script {
             Script::None => base,
-            Script::Sub(sub) => match self.mapped_script(sub, lower_conf) {
+            Script::Sub(sub) => match self.mapped_operand(sub, lower_conf) {
                 Some(text) => base.beside(Block::text(text)),
                 None => base.with_scripts(Some(self.block_simple_stripped(sub)), None),
             },
-            Script::Super(sup) => match self.mapped_script(sup, upper_conf) {
+            Script::Super(sup) => match self.mapped_operand(sup, upper_conf) {
                 Some(text) => base.beside(Block::text(text)),
                 None => base.with_scripts(None, Some(self.block_simple_stripped(sup))),
             },
             Script::Subsuper(sub, sup) => {
-                if let Some(lower) = self.mapped_script(sub, lower_conf)
-                    && let Some(upper) = self.mapped_script(sup, upper_conf)
+                if let Some(lower) = self.mapped_operand(sub, lower_conf)
+                    && let Some(upper) = self.mapped_operand(sup, upper_conf)
                 {
                     base.beside(Block::text(format!("{lower}{upper}")))
                 } else {
@@ -512,16 +512,8 @@ impl Conf {
     }
 
     fn block_frac(self, frac: &Frac<'_>) -> Block {
-        if let (
-            ScriptFunc::Simple(SimpleScript {
-                simple: num,
-                script: Script::None,
-            }),
-            ScriptFunc::Simple(SimpleScript {
-                simple: den,
-                script: Script::None,
-            }),
-        ) = (&frac.numer, &frac.denom)
+        if let Some(num) = frac.numer.as_simple()
+            && let Some(den) = frac.denom.as_simple()
         {
             self.block_simplefrac(num, den)
         } else {
@@ -533,12 +525,9 @@ impl Conf {
     }
 
     fn block_scriptfunc_for_frac(self, sf: &ScriptFunc<'_>) -> Block {
-        match sf {
-            ScriptFunc::Simple(SimpleScript {
-                simple,
-                script: Script::None,
-            }) => self.block_simple_stripped(simple),
-            _ => self.block_scriptfunc(sf),
+        match sf.as_simple() {
+            Some(simple) => self.block_simple_stripped(simple),
+            None => self.block_scriptfunc(sf),
         }
     }
 
