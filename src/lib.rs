@@ -55,7 +55,7 @@ use std::fmt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct Conf {
-    /// If true, this will strip unnecessary parenthesis in some contexts
+    /// Drop ( ), [ ] and { } around fractions, scripts and command arguments
     pub strip_brackets: bool,
     /// If true, this will try to render fractions as vulgar fractions
     pub vulgar_fracs: bool,

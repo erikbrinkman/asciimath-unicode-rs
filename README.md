@@ -61,7 +61,7 @@ assert_eq!(res, "x\n─\ny");
 
 | Field            |       Type |   Default | Description                                                                       |
 |------------------|------------|-----------|-----------------------------------------------------------------------------------|
-| `strip_brackets` |     `bool` |    `true` | Strip unnecessary parentheses in some contexts                                    |
+| `strip_brackets` |     `bool` |    `true` | Drop ( ), [ ] and { } around fractions, scripts and command arguments             |
 | `vulgar_fracs`   |     `bool` |    `true` | Render fractions as vulgar fractions (e.g. ½)                                     |
 | `script_fracs`   |     `bool` |    `true` | Render fractions using super/subscripts (e.g. ¹⁄₂)                                |
 | `skin_tone`      | `SkinTone` | `Default` | Default skin tone for emojis                                                      |

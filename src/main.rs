@@ -30,7 +30,7 @@ impl From<Tone> for SkinTone {
 #[derive(Debug, Clone, Parser)]
 #[command(version, about)]
 struct Args {
-    /// Don't strip unnecessary parenthesis in some contexts
+    /// Keep ( ), [ ] and { } around fractions, scripts and command arguments
     #[arg(long)]
     no_strip_brackets: bool,
 
