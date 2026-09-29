@@ -34,20 +34,17 @@ fn no_vulgar_fracs() {
 }
 
 #[test]
-fn no_script_fracs() {
+fn inline_plain_layout() {
     assert_eq!(
-        run(&["--no-vulgar-fracs", "--no-script-fracs"], "1/2"),
+        run(&["--no-vulgar-fracs", "--layout", "inline-plain"], "1/2"),
         "1/2\n"
     );
 }
 
 #[test]
-fn block_no_script_fracs_stacks() {
+fn block_no_vulgar_fracs_stacks() {
     assert_eq!(
-        run(
-            &["--block", "--no-vulgar-fracs", "--no-script-fracs"],
-            "1/2"
-        ),
+        run(&["--layout", "block", "--no-vulgar-fracs"], "1/2"),
         "1\n─\n2\n"
     );
 }
@@ -59,14 +56,14 @@ fn no_strip_brackets() {
 
 #[test]
 fn block_mode() {
-    assert_eq!(run(&["--block"], "x/y"), "x\n─\ny\n");
+    assert_eq!(run(&["--layout", "block"], "x/y"), "x\n─\ny\n");
 }
 
 #[test]
 fn closed_stdout_pipe_is_not_an_error() {
     // a reader that closes the pipe early must not make the binary fail
     let mut child = Command::new(env!("CARGO_BIN_EXE_asciimath-unicode"))
-        .arg("--block")
+        .args(["--layout", "block"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

@@ -1,4 +1,4 @@
-use asciimath_unicode::{Conf, SkinTone};
+use asciimath_unicode::{Conf, Layout, SkinTone};
 use clap::{Parser, ValueEnum};
 use std::io;
 use std::io::{Read, Write};
@@ -27,6 +27,26 @@ impl From<Tone> for SkinTone {
     }
 }
 
+#[derive(Debug, Clone, ValueEnum)]
+enum LayoutArg {
+    /// One line, fractions as super- and subscripts
+    InlineScript,
+    /// One line, fractions with a slash
+    InlinePlain,
+    /// Several lines, with stacked fractions and grids
+    Block,
+}
+
+impl From<LayoutArg> for Layout {
+    fn from(inp: LayoutArg) -> Self {
+        match inp {
+            LayoutArg::InlineScript => Layout::InlineScript,
+            LayoutArg::InlinePlain => Layout::InlinePlain,
+            LayoutArg::Block => Layout::Block,
+        }
+    }
+}
+
 /// Convert asciimath in stdin to unicode in stdout
 #[derive(Debug, Clone, Parser)]
 #[command(version, about)]
@@ -39,17 +59,13 @@ struct Args {
     #[arg(long)]
     no_vulgar_fracs: bool,
 
-    /// Don't render fractions using super- and sub-scripts
-    #[arg(long)]
-    no_script_fracs: bool,
-
     /// Skin tone for emoji
     #[arg(long, value_enum, default_value_t = Tone::Default)]
     skin_tone: Tone,
 
-    /// Render as multi-line 2D block (stacked fractions, vertical scripts, matrix grids)
-    #[arg(long)]
-    block: bool,
+    /// How to lay out the math
+    #[arg(long, value_enum, default_value_t = LayoutArg::InlineScript)]
+    layout: LayoutArg,
 }
 
 impl From<Args> for Conf {
@@ -57,9 +73,8 @@ impl From<Args> for Conf {
         Conf {
             strip_brackets: !inp.no_strip_brackets,
             vulgar_fracs: !inp.no_vulgar_fracs,
-            script_fracs: !inp.no_script_fracs,
             skin_tone: inp.skin_tone.into(),
-            block: inp.block,
+            layout: inp.layout.into(),
         }
     }
 }
