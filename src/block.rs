@@ -53,6 +53,10 @@ impl Block {
         self.lines.len()
     }
 
+    fn has_bar(&self) -> bool {
+        self.lines.iter().any(|line| line.contains('─'))
+    }
+
     fn is_multiline(&self) -> bool {
         self.lines.len() > 1
     }
@@ -97,7 +101,13 @@ impl Block {
     }
 
     fn stack_frac(numer: Self, denom: Self) -> Self {
-        let bar_width = numer.width.max(denom.width);
+        // a nested fraction's bar would be as long as this one without the overhang
+        let overhang = if numer.has_bar() || denom.has_bar() {
+            2
+        } else {
+            0
+        };
+        let bar_width = numer.width.max(denom.width) + overhang;
         let bar = "─".repeat(bar_width);
         let baseline = numer.lines.len();
 
@@ -133,6 +143,44 @@ impl Block {
                 .beside(right_col)
                 .with_baseline(new_baseline)
         }
+    }
+
+    /// Attach scripts to the right in one column, `sup` above this block and `sub` below it
+    fn with_scripts(self, sub: Option<Self>, sup: Option<Self>) -> Self {
+        let sup_height = sup.as_ref().map_or(0, Block::height);
+        let width = sub
+            .iter()
+            .chain(&sup)
+            .map(|block| block.width)
+            .max()
+            .unwrap_or(0);
+        let blank = " ".repeat(width);
+        let lines = sup
+            .into_iter()
+            .flat_map(|block| block.pad_right(width).lines)
+            .chain(iter::repeat_n(blank, self.height()))
+            .chain(
+                sub.into_iter()
+                    .flat_map(|block| block.pad_right(width).lines),
+            )
+            .collect();
+        let column = Block {
+            lines,
+            baseline: sup_height + self.baseline,
+            width,
+        };
+        self.beside(column)
+    }
+
+    fn pad_right(mut self, width: usize) -> Self {
+        if width > self.width {
+            let extra = " ".repeat(width - self.width);
+            for line in &mut self.lines {
+                line.push_str(&extra);
+            }
+            self.width = width;
+        }
+        self
     }
 
     fn with_baseline(mut self, new_baseline: usize) -> Self {
@@ -285,6 +333,17 @@ fn is_spaced_ident(id: &str) -> bool {
     matches!(id, "+" | "-" | "=" | ">" | "<" | "≤" | "≥" | "≠")
 }
 
+fn is_sign(inter: &Intermediate<'_>) -> bool {
+    matches!(
+        inter,
+        Intermediate::ScriptFunc(ScriptFunc::Simple(SimpleScript {
+            simple: Simple::Symbol("+" | "-" | "+-" | "pm" | "-+" | "mp")
+                | Simple::Ident("+" | "-"),
+            script: Script::None,
+        }))
+    )
+}
+
 fn inter_is_spaced_op(inter: &Intermediate<'_>) -> bool {
     match inter {
         Intermediate::ScriptFunc(ScriptFunc::Simple(SimpleScript {
@@ -318,21 +377,19 @@ impl Conf {
         };
         let mut result = first_block;
         let mut prev = first;
-        let mut spaced_after_prev = false;
+        // a sign at the start or right after another operator is unary and hugs its operand
+        let mut prev_binary_op = inter_is_spaced_op(first) && !is_sign(first);
+        let mut prev_op = inter_is_spaced_op(first);
         for (inter, block) in items {
-            if inter_is_spaced_op(inter) {
+            let is_op = inter_is_spaced_op(inter);
+            let binary_op = is_op && !(prev_op && is_sign(inter));
+            if prev_binary_op || binary_op || needs_space(prev, inter) {
                 result = result.beside(Block::space(1));
-                result = result.beside(block);
-                result = result.beside(Block::space(1));
-                spaced_after_prev = true;
-            } else {
-                if !spaced_after_prev && needs_space(prev, inter) {
-                    result = result.beside(Block::space(1));
-                }
-                result = result.beside(block);
-                spaced_after_prev = false;
             }
+            result = result.beside(block);
             prev = inter;
+            prev_op = is_op;
+            prev_binary_op = binary_op;
         }
         result
     }
@@ -357,80 +414,34 @@ impl Conf {
     }
 
     fn block_apply_script(self, base: Block, script: &Script<'_>) -> Block {
+        let lower_conf = MapperConf {
+            sub_sup: Some(subscript_char),
+            ..MapperConf::default()
+        };
+        let upper_conf = MapperConf {
+            sub_sup: Some(superscript_char),
+            ..MapperConf::default()
+        };
         match script {
             Script::None => base,
-            Script::Sub(sub) => {
-                let conf = MapperConf {
-                    sub_sup: Some(subscript_char),
-                    ..MapperConf::default()
-                };
-                let mut out = String::new();
-                if self.inline_simple(sub, &mut conf.wrap(&mut out)).is_ok() {
-                    base.beside(Block::text(out))
-                } else {
-                    // Vertical: sub below-right
-                    let sub_blk = self.block_simple(sub);
-                    let original = base.baseline;
-                    let base_h = base.height();
-                    base.with_baseline(base_h)
-                        .beside(sub_blk.with_baseline(0))
-                        .with_baseline(original)
-                }
-            }
-            Script::Super(sup) => {
-                let conf = MapperConf {
-                    sub_sup: Some(superscript_char),
-                    ..MapperConf::default()
-                };
-                let mut out = String::new();
-                if self.inline_simple(sup, &mut conf.wrap(&mut out)).is_ok() {
-                    base.beside(Block::text(out))
-                } else {
-                    // Vertical: sup above-right
-                    let sup_blk = self.block_simple(sup);
-                    let new_baseline = sup_blk.height() + base.baseline;
-                    let sup_h = sup_blk.height();
-                    base.with_baseline(0)
-                        .beside(sup_blk.with_baseline(sup_h))
-                        .with_baseline(new_baseline)
-                }
-            }
+            Script::Sub(sub) => match self.mapped_script(sub, lower_conf) {
+                Some(text) => base.beside(Block::text(text)),
+                None => base.with_scripts(Some(self.block_simple_stripped(sub)), None),
+            },
+            Script::Super(sup) => match self.mapped_script(sup, upper_conf) {
+                Some(text) => base.beside(Block::text(text)),
+                None => base.with_scripts(None, Some(self.block_simple_stripped(sup))),
+            },
             Script::Subsuper(sub, sup) => {
-                let lower_conf = MapperConf {
-                    sub_sup: Some(subscript_char),
-                    ..MapperConf::default()
-                };
-                let upper_conf = MapperConf {
-                    sub_sup: Some(superscript_char),
-                    ..MapperConf::default()
-                };
-                let mut subscript = String::new();
-                let mut superscript = String::new();
-                if self
-                    .inline_simple(sub, &mut lower_conf.wrap(&mut subscript))
-                    .is_ok()
-                    && self
-                        .inline_simple(sup, &mut upper_conf.wrap(&mut superscript))
-                        .is_ok()
+                if let Some(lower) = self.mapped_script(sub, lower_conf)
+                    && let Some(upper) = self.mapped_script(sup, upper_conf)
                 {
-                    base.beside(Block::text(format!("{subscript}{superscript}")))
+                    base.beside(Block::text(format!("{lower}{upper}")))
                 } else {
-                    // Vertical: sup above-right, then sub below-right
-                    let upper = self.block_simple(sup);
-                    let new_baseline = upper.height() + base.baseline;
-                    let upper_h = upper.height();
-                    let with_sup = base
-                        .with_baseline(0)
-                        .beside(upper.with_baseline(upper_h))
-                        .with_baseline(new_baseline);
-
-                    let lower = self.block_simple(sub);
-                    let original = with_sup.baseline;
-                    let with_sup_h = with_sup.height();
-                    with_sup
-                        .with_baseline(with_sup_h)
-                        .beside(lower.with_baseline(0))
-                        .with_baseline(original)
+                    base.with_scripts(
+                        Some(self.block_simple_stripped(sub)),
+                        Some(self.block_simple_stripped(sup)),
+                    )
                 }
             }
         }
@@ -485,44 +496,22 @@ impl Conf {
         }
     }
 
-    fn try_script_simplefrac(self, numer: &Simple<'_>, denom: &Simple<'_>) -> Option<String> {
-        if self.script_fracs {
-            let mut text = String::new();
-            self.inline_simplefrac(numer, denom, &mut Mapper::new(&mut text))
-                .ok()?;
-            Some(text)
-        } else {
-            None
-        }
-    }
-
-    fn try_script_frac(self, frac: &Frac<'_>) -> Option<String> {
-        if self.script_fracs {
-            let mut text = String::new();
-            self.inline_frac(frac, &mut Mapper::new(&mut text)).ok()?;
-            Some(text)
-        } else {
-            None
-        }
-    }
-
     fn block_simplefrac(self, numer: &Simple<'_>, denom: &Simple<'_>) -> Block {
+        // script fractions would stack or not depending on which letters have script forms
         if self.vulgar_fracs
             && let Some(frac) = super::ast::extract_vulgar_frac(numer, denom, self.strip_brackets)
         {
             Block::text(frac)
-        } else if let Some(text) = self.try_script_simplefrac(numer, denom) {
-            Block::text(text)
         } else {
             Block::stack_frac(
-                self.block_simple_or_expr_stripped(numer),
-                self.block_simple_or_expr_stripped(denom),
+                self.block_simple_stripped(numer),
+                self.block_simple_stripped(denom),
             )
         }
     }
 
     /// If `strip_brackets` is on and simple is a group, render the inner expression.
-    fn block_simple_or_expr_stripped(self, simple: &Simple<'_>) -> Block {
+    fn block_simple_stripped(self, simple: &Simple<'_>) -> Block {
         if let Some(expr) = self.stripped(simple) {
             self.block_expression(expr)
         } else {
@@ -543,8 +532,6 @@ impl Conf {
         ) = (&frac.numer, &frac.denom)
         {
             self.block_simplefrac(num, den)
-        } else if let Some(text) = self.try_script_frac(frac) {
-            Block::text(text)
         } else {
             Block::stack_frac(
                 self.block_scriptfunc_for_frac(&frac.numer),
@@ -558,7 +545,7 @@ impl Conf {
             ScriptFunc::Simple(SimpleScript {
                 simple,
                 script: Script::None,
-            }) => self.block_simple_or_expr_stripped(simple),
+            }) => self.block_simple_stripped(simple),
             _ => self.block_scriptfunc(sf),
         }
     }
@@ -571,44 +558,46 @@ impl Conf {
     }
 
     fn block_matrix(self, matrix: &Matrix<'_>) -> Block {
-        let num_rows = matrix.num_rows();
         let num_cols = matrix.num_cols();
         let sep_width = 2;
 
-        let mut cells = Vec::with_capacity(num_rows * num_cols);
-        for row in matrix.rows() {
-            for expr in row {
-                cells.push(self.block_expression(expr));
-            }
-        }
+        let rows: Vec<Vec<Block>> = matrix
+            .rows()
+            .map(|row| row.iter().map(|expr| self.block_expression(expr)).collect())
+            .collect();
+        let col_widths: Vec<usize> = (0..num_cols)
+            .map(|col| {
+                rows.iter()
+                    .map(|row| row[col].width)
+                    .max()
+                    .unwrap_or_default()
+            })
+            .collect();
+        let total_width = col_widths.iter().sum::<usize>() + (num_cols - 1) * sep_width;
+        // rows of tall cells are hard to tell apart without a gap
+        let spaced = rows.iter().flatten().any(Block::is_multiline);
 
-        // one width, one above, one below for all cells
-        let col_width = cells.iter().map(|c| c.width).max().unwrap_or_default();
-        let above = cells.iter().map(|c| c.baseline).max().unwrap_or_default();
-        let below = cells
-            .iter()
-            .map(|c| c.height() - 1 - c.baseline)
-            .max()
-            .unwrap_or_default();
-
-        // build rows
-        let total_width = col_width * num_cols + (num_cols - 1) * sep_width;
         let mut grid_lines: Vec<String> = Vec::new();
-        let mut cells = cells.into_iter();
-        for _ in 0..num_rows {
-            if !grid_lines.is_empty() {
+        for row in rows {
+            if spaced && !grid_lines.is_empty() {
                 grid_lines.push(" ".repeat(total_width));
             }
-            let mut cell_row = cells
-                .by_ref()
-                .take(num_cols)
-                .map(|cell| cell.pad_vertical(above, below).pad_center(col_width));
-            let mut row_block: Block = cell_row
-                .next()
+            let above = row
+                .iter()
+                .map(|cell| cell.baseline)
+                .max()
+                .unwrap_or_default();
+            let below = row
+                .iter()
+                .map(|cell| cell.height() - 1 - cell.baseline)
+                .max()
+                .unwrap_or_default();
+            let row_block = row
+                .into_iter()
+                .zip(&col_widths)
+                .map(|(cell, &width)| cell.pad_vertical(above, below).pad_center(width))
+                .reduce(|left, right| left.beside(Block::space(sep_width)).beside(right))
                 .unwrap_or_else(|| unreachable!("must have at least one col"));
-            for cell in cell_row {
-                row_block = row_block.beside(Block::space(sep_width)).beside(cell);
-            }
             grid_lines.extend(row_block.lines);
         }
 
@@ -743,8 +732,10 @@ mod tests {
     }
 
     #[test]
-    fn script_frac_passthrough() {
-        assert_eq!(render_block("x/n"), "ˣ⁄ₙ");
+    fn letter_fracs_stack() {
+        // whether letters have script forms doesn't decide the layout
+        assert_eq!(render_block("x/n"), "x\n─\nn");
+        assert_eq!(render_block("n/2"), "n\n─\n2");
     }
 
     #[test]
@@ -800,21 +791,12 @@ mod tests {
 
     #[test]
     fn matrix_simple() {
-        let result = render_block("[[a,b],[c,d]]");
-        assert!(result.contains('a'));
-        assert!(result.contains('b'));
-        assert!(result.contains('c'));
-        assert!(result.contains('d'));
-        assert!(result.contains('⎡') || result.contains('['));
+        assert_eq!(render_block("[[a,b],[c,d]]"), "⎡a  b⎤\n⎣c  d⎦");
     }
 
     #[test]
     fn frac_plus_term() {
-        let result = render_block("x/y + z");
-        let lines: Vec<&str> = result.lines().collect();
-        assert_eq!(lines.len(), 3);
-        assert!(lines[1].contains('+'));
-        assert!(lines[1].contains('z'));
+        assert_eq!(render_block("x/y + z"), "x\n─ + z\ny");
     }
 
     #[test]
@@ -837,10 +819,10 @@ mod tests {
 
     #[test]
     fn angle_bracket_height() {
-        let result = render_block("<< (x + 1) / x_y >>");
-        eprintln!("angle bracket result:\n{result}");
-        let lines: Vec<&str> = result.lines().collect();
-        assert_eq!(lines.len(), 4, "expected 4 lines:\n{result}");
+        assert_eq!(
+            render_block("<< (x + 1) / x_y >>"),
+            "╱x + 1╲\n⎜─────⎟\n⎜  x  ⎟\n╲   y ╱"
+        );
     }
 
     #[test]
@@ -888,12 +870,12 @@ mod tests {
         // box-drawing │ filler
         assert_eq!(
             render_block_conf("((a/b)/(c/d))", stacked()),
-            "⎛a⎞\n⎜─⎟\n⎜b⎟\n⎜─⎟\n⎜c⎟\n⎜─⎟\n⎝d⎠"
+            "⎛ a ⎞\n⎜ ─ ⎟\n⎜ b ⎟\n⎜───⎟\n⎜ c ⎟\n⎜ ─ ⎟\n⎝ d ⎠"
         );
         // ceiling columns stay in the square-bracket family (no stray paren ⎜/⎟)
         assert_eq!(
             render_block_conf("|~ (a/b)/(c/d) ~|", stacked()),
-            "⌈a⌉\n⎢─⎥\n⎢b⎥\n⎢─⎥\n⎢c⎥\n⎢─⎥\n⎢d⎥"
+            "⌈ a ⌉\n⎢ ─ ⎥\n⎢ b ⎥\n⎢───⎥\n⎢ c ⎥\n⎢ ─ ⎥\n⎢ d ⎥"
         );
     }
 
@@ -907,32 +889,57 @@ mod tests {
     #[test]
     fn vertical_superscript_fraction() {
         let result = render_block_conf("x^(a/b)", stacked());
-        assert_eq!(result, " ⎛a⎞\n ⎜─⎟\n ⎝b⎠\nx");
+        assert_eq!(result, " a\n ─\n b\nx");
     }
 
     #[test]
     fn vertical_subscript_fraction() {
         let result = render_block_conf("x_(a/b)", stacked());
-        assert_eq!(result, "x\n ⎛a⎞\n ⎜─⎟\n ⎝b⎠");
+        assert_eq!(result, "x\n a\n ─\n b");
     }
 
     #[test]
     fn vertical_subsuper_fraction() {
+        // superscript stacked above, base, subscript stacked below, in one column
         let result = render_block_conf("x_(a/b)^(c/d)", stacked());
-        let lines: Vec<&str> = result.lines().collect();
-        // superscript stacked above, base, subscript stacked below
-        assert_eq!(lines.len(), 7);
-        assert!(result.contains('c') && result.contains('d'));
-        assert!(result.contains('a') && result.contains('b'));
+        assert_eq!(result, " c\n ─\n d\nx\n a\n ─\n b");
+    }
+
+    #[test]
+    fn vertical_subsuper_one_column() {
+        assert_eq!(render_block("x_b^q"), " q\nx\n b");
+        assert_eq!(render_block("x_y^rho"), " ρ\nx\n y");
+    }
+
+    #[test]
+    fn block_script_brackets_stripped() {
+        assert_eq!(render_block("x_(2i)"), "x₂ᵢ");
+        assert_eq!(render_block("sum_(i=1)^n i"), "∑ᵢ₌₁ⁿ i");
+    }
+
+    #[test]
+    fn block_unary_sign() {
+        assert_eq!(render_block("x = -1"), "x = -1");
+        assert_eq!(render_block("-x + 1"), "-x + 1");
+        assert_eq!(render_block("a - b"), "a - b");
+        assert_eq!(render_block("a and -b"), "a and -b");
+        assert_eq!(render_block("x > 0 or x < -1"), "x > 0 or x < -1");
     }
 
     #[test]
     fn matrix_tall_content() {
+        // a spacer row separates rows only when a cell spans several lines
         let result = render_block_conf("[[a/b,c],[d,e/f]]", stacked());
-        assert!(result.contains('⎡') && result.contains('⎦'));
-        for needle in ['a', 'b', 'c', 'd', 'e', 'f'] {
-            assert!(result.contains(needle), "missing {needle} in:\n{result}");
-        }
+        assert_eq!(
+            result,
+            "⎡a   ⎤\n⎢─  c⎥\n⎢b   ⎥\n⎢    ⎥\n⎢   e⎥\n⎢d  ─⎥\n⎣   f⎦"
+        );
+    }
+
+    #[test]
+    fn matrix_column_widths() {
+        assert_eq!(render_block("[[a,xyz],[c,d]]"), "⎡a  xyz⎤\n⎣c   d ⎦");
+        assert_eq!(render_block("[[1,-2],[30,4]]"), "⎡ 1  -2⎤\n⎣30   4⎦");
     }
 
     #[test]
@@ -946,8 +953,7 @@ mod tests {
     fn simple_func_in_block() {
         // a function applied to a multiline argument renders beside it.
         let result = render_block_conf("sin(x/y)", stacked());
-        assert!(result.contains("sin"));
-        assert_eq!(result.lines().count(), 3);
+        assert_eq!(result, "   ⎛x⎞\nsin⎜─⎟\n   ⎝y⎠");
     }
 
     #[test]
@@ -1004,12 +1010,9 @@ mod tests {
 
     #[test]
     fn block_nested_frac() {
+        // the outer bar overhangs so it can't be mistaken for an inner one
         let result = render_block_conf("(a/b)/(c/d)", stacked());
-        let lines: Vec<&str> = result.lines().collect();
-        assert!(lines.len() >= 5);
-        for needle in ['a', 'b', 'c', 'd'] {
-            assert!(result.contains(needle), "missing {needle} in:\n{result}");
-        }
+        assert_eq!(result, " a\n ─\n b\n───\n c\n ─\n d");
     }
 
     #[test]
@@ -1052,11 +1055,11 @@ mod tests {
 
     #[test]
     fn block_script_fraction() {
-        // with script fractions enabled, a subscriptable frac renders inline in block mode
+        // script fractions are inline-only; block mode stacks
         let conf = Conf {
             block: true,
             ..Default::default()
         };
-        assert_eq!(conf.parse("x/n").to_string(), "ˣ⁄ₙ");
+        assert_eq!(conf.parse("x/n").to_string(), "x\n─\nn");
     }
 }
