@@ -4,6 +4,9 @@
 //! implements [`fmt::Display`]. If you want more control, see the options exposed through [`Conf`]
 //! which can [`parse`][Conf::parse] input into [`Asciimath`] as well.
 //!
+//! All of the input is read as math, so prose run through this comes out mangled: `it is` renders
+//! as `𝑖s`. Pick the math out of prose first.
+//!
 //! # Usage
 //!
 //! ## Binary
@@ -31,10 +34,7 @@
 //!
 //! ```
 //! use asciimath_unicode::Conf;
-//! let conf = Conf {
-//!     vulgar_fracs: false,
-//!     ..Default::default()
-//! };
+//! let conf = Conf::default().with_vulgar_fracs(false);
 //! let res = conf.parse("1/2").to_string();
 //! assert_eq!(res, "¹⁄₂");
 //! ```
@@ -46,14 +46,87 @@ mod block;
 mod inline;
 mod tokens;
 
-pub use asciimath_parser::tree::Expression;
-pub use emojis::SkinTone;
+use asciimath_parser::tree::Expression;
 use inline::Mapper;
 use std::fmt;
 
+macro_rules! skin_tones {
+    ($default:ident, $($tone:ident),+ $(,)?) => {
+        /// Skin tone for emojis that take one
+        ///
+        /// The paired tones are for emojis with two people, like a couple, and name the two tones
+        /// in order.
+        #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum SkinTone {
+            #[doc = concat!("The `", stringify!($default), "` skin tone")]
+            #[default]
+            $default,
+            $(
+                #[doc = concat!("The `", stringify!($tone), "` skin tone")]
+                $tone,
+            )+
+        }
+
+        impl From<SkinTone> for emojis::SkinTone {
+            fn from(tone: SkinTone) -> Self {
+                match tone {
+                    SkinTone::$default => emojis::SkinTone::$default,
+                    $(SkinTone::$tone => emojis::SkinTone::$tone,)+
+                }
+            }
+        }
+
+        #[cfg(test)]
+        mod skin_tone_tests {
+            #[test]
+            fn every_tone_has_an_emoji_tone() {
+                for (ours, theirs) in [
+                    (super::SkinTone::$default, emojis::SkinTone::$default),
+                    $((super::SkinTone::$tone, emojis::SkinTone::$tone),)+
+                ] {
+                    assert_eq!(emojis::SkinTone::from(ours), theirs);
+                }
+            }
+        }
+    };
+}
+
+skin_tones! {
+    Default,
+    Light,
+    MediumLight,
+    Medium,
+    MediumDark,
+    Dark,
+    LightAndMediumLight,
+    LightAndMedium,
+    LightAndMediumDark,
+    LightAndDark,
+    MediumLightAndLight,
+    MediumLightAndMedium,
+    MediumLightAndMediumDark,
+    MediumLightAndDark,
+    MediumAndLight,
+    MediumAndMediumLight,
+    MediumAndMediumDark,
+    MediumAndDark,
+    MediumDarkAndLight,
+    MediumDarkAndMediumLight,
+    MediumDarkAndMedium,
+    MediumDarkAndDark,
+    DarkAndLight,
+    DarkAndMediumLight,
+    DarkAndMedium,
+    DarkAndMediumDark,
+}
+
 /// Configuration for unicode rendering of asciimath
+///
+/// Start from [`Conf::default()`][Default::default] and change what you need, by field or with the
+/// `with_*` methods.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
+#[non_exhaustive]
 pub struct Conf {
     /// Drop ( ), [ ] and { } around fractions, scripts and command arguments
     pub strip_brackets: bool,
@@ -89,6 +162,36 @@ impl Default for Conf {
 }
 
 impl Conf {
+    /// Set whether brackets that only group are dropped
+    #[must_use]
+    pub fn with_strip_brackets(self, strip_brackets: bool) -> Self {
+        Conf {
+            strip_brackets,
+            ..self
+        }
+    }
+
+    /// Set whether fractions are rendered as vulgar fractions
+    #[must_use]
+    pub fn with_vulgar_fracs(self, vulgar_fracs: bool) -> Self {
+        Conf {
+            vulgar_fracs,
+            ..self
+        }
+    }
+
+    /// Set the skin tone for emojis
+    #[must_use]
+    pub fn with_skin_tone(self, skin_tone: SkinTone) -> Self {
+        Conf { skin_tone, ..self }
+    }
+
+    /// Set how the math is laid out
+    #[must_use]
+    pub fn with_layout(self, layout: Layout) -> Self {
+        Conf { layout, ..self }
+    }
+
     /// Whether one-line fractions may be written as super- and subscripts
     fn script_fracs(self) -> bool {
         self.layout != Layout::InlinePlain
@@ -109,10 +212,8 @@ impl Conf {
 /// Implements [`fmt::Display`] so it can be used with `format!`, `write!`, or `.to_string()`.
 #[derive(Debug, Clone)]
 pub struct Asciimath<'a> {
-    /// Rendering configuration
-    pub conf: Conf,
-    /// The parsed expression
-    pub expr: Expression<'a>,
+    conf: Conf,
+    expr: Expression<'a>,
 }
 
 impl fmt::Display for Asciimath<'_> {
