@@ -12,6 +12,9 @@ To convert asciimath quickly, you can use `parse_unicode` to get an `Asciimath`
 value that implements `Display`.  If you want more control, see the options
 exposed through `Conf` which can `parse` input into `Asciimath` as well.
 
+All of the input is read as math, so prose run through this comes out mangled:
+`it is` renders as `𝑖s`.  Pick the math out of prose first.
+
 # Usage
 
 ## Binary
@@ -39,25 +42,22 @@ assert_eq!(res, "½");
 
 ```rust
 use asciimath_unicode::Conf;
-let conf = Conf {
-    vulgar_fracs: false,
-    ..Default::default()
-};
+let conf = Conf::default().with_vulgar_fracs(false);
 let res = conf.parse("1/2").to_string();
 assert_eq!(res, "¹⁄₂");
 ```
 
 ```rust
 use asciimath_unicode::{Conf, Layout};
-let conf = Conf {
-    layout: Layout::Block,
-    ..Default::default()
-};
+let conf = Conf::default().with_layout(Layout::Block);
 let res = conf.parse("x/y").to_string();
 assert_eq!(res, "x\n─\ny");
 ```
 
 ## Configuration
+
+`Conf` starts from `default()`; set fields directly or with the matching
+`with_*` method.
 
 | Field            |       Type |        Default | Description                                                           |
 |------------------|------------|----------------|-----------------------------------------------------------------------|

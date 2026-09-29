@@ -1,9 +1,9 @@
 //! Definitions of the relevant tokens and conversions between them
 
+use super::SkinTone;
 use asciimath_parser::prefix_map::HashPrefixMap;
 use asciimath_parser::tree::Expression;
 use asciimath_parser::{Token, Tokenizer};
-use emojis::SkinTone;
 use std::borrow::Cow;
 use std::sync::LazyLock;
 
@@ -415,7 +415,10 @@ pub fn symbol_str(inp: &str, skin_tone: SkinTone) -> &str {
             .and_then(|code| code.strip_suffix(':'))
             .and_then(emojis::get_by_shortcode)
             .map_or(other, |emoji| {
-                emoji.with_skin_tone(skin_tone).unwrap_or(emoji).as_str()
+                emoji
+                    .with_skin_tone(skin_tone.into())
+                    .unwrap_or(emoji)
+                    .as_str()
             }),
     }
 }

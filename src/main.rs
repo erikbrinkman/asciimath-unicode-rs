@@ -70,12 +70,11 @@ struct Args {
 
 impl From<Args> for Conf {
     fn from(inp: Args) -> Self {
-        Conf {
-            strip_brackets: !inp.no_strip_brackets,
-            vulgar_fracs: !inp.no_vulgar_fracs,
-            skin_tone: inp.skin_tone.into(),
-            layout: inp.layout.into(),
-        }
+        Conf::default()
+            .with_strip_brackets(!inp.no_strip_brackets)
+            .with_vulgar_fracs(!inp.no_vulgar_fracs)
+            .with_skin_tone(inp.skin_tone.into())
+            .with_layout(inp.layout.into())
     }
 }
 
