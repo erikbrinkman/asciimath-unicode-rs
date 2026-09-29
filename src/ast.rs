@@ -1,6 +1,8 @@
 #![allow(missing_docs, clippy::must_use_candidate)]
 
-use asciimath_parser::tree::{Expression, Intermediate, Script, ScriptFunc, Simple, SimpleScript};
+use asciimath_parser::tree::{
+    Expression, Group, Intermediate, Script, ScriptFunc, Simple, SimpleScript,
+};
 
 fn vulgar_frac_char(num: &str, den: &str) -> Option<char> {
     match (num, den) {
@@ -32,7 +34,29 @@ fn vulgar_frac_char(num: &str, den: &str) -> Option<char> {
     }
 }
 
-pub fn extract_single_char(expr: &Expression<'_>) -> Option<char> {
+/// The contents of a group whose brackets only group
+pub fn paren_contents<'s, 'a>(simple: &'s Simple<'a>) -> Option<&'s Expression<'a>> {
+    match simple {
+        Simple::Group(Group {
+            left_bracket,
+            expr,
+            right_bracket,
+        }) if matches!(
+            *left_bracket,
+            "(" | "left(" | "[" | "left[" | "{" | "{:" | ""
+        ) && matches!(
+            *right_bracket,
+            ")" | "right)" | "]" | "right]" | "}" | ":}" | ""
+        ) =>
+        {
+            Some(expr)
+        }
+        _ => None,
+    }
+}
+
+/// The lone unscripted simple an expression consists of, if any
+pub fn single_simple<'s, 'a>(expr: &'s Expression<'a>) -> Option<&'s Simple<'a>> {
     if let [
         Intermediate::ScriptFunc(ScriptFunc::Simple(SimpleScript {
             simple,
@@ -40,42 +64,30 @@ pub fn extract_single_char(expr: &Expression<'_>) -> Option<char> {
         })),
     ] = &**expr
     {
-        match simple {
-            &Simple::Ident(s) | &Simple::Number(s) => {
-                let mut iter = s.chars();
-                let first = iter.next();
-                if iter.next().is_none() { first } else { None }
-            }
-            _ => None,
-        }
+        Some(simple)
     } else {
         None
     }
 }
 
-pub fn extract_simple_str<'a>(simple: &Simple<'a>, strip: bool) -> Option<&'a str> {
+pub fn unwrap_parens<'s, 'a>(simple: &'s Simple<'a>) -> &'s Simple<'a> {
+    paren_contents(simple)
+        .and_then(single_simple)
+        .unwrap_or(simple)
+}
+
+fn simple_str<'a>(simple: &Simple<'a>) -> Option<&'a str> {
     match simple {
-        &Simple::Number(n) => Some(n),
-        &Simple::Ident(i) => Some(i),
-        Simple::Group(g) if strip => {
-            if let [
-                Intermediate::ScriptFunc(ScriptFunc::Simple(SimpleScript {
-                    simple,
-                    script: Script::None,
-                })),
-            ] = &*g.expr
-            {
-                extract_simple_str(simple, false)
-            } else {
-                None
-            }
-        }
+        &Simple::Number(text) | &Simple::Ident(text) => Some(text),
         _ => None,
     }
 }
 
 pub fn extract_vulgar_frac(numer: &Simple<'_>, denom: &Simple<'_>, strip: bool) -> Option<char> {
-    let num = extract_simple_str(numer, strip)?;
-    let den = extract_simple_str(denom, strip)?;
-    vulgar_frac_char(num, den)
+    let (num, den) = if strip {
+        (unwrap_parens(numer), unwrap_parens(denom))
+    } else {
+        (numer, denom)
+    };
+    vulgar_frac_char(simple_str(num)?, simple_str(den)?)
 }

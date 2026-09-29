@@ -9,7 +9,7 @@ use std::fmt::Write;
 use unicode_normalization::char::compose;
 
 use super::Conf;
-use super::ast::{extract_single_char, extract_vulgar_frac};
+use super::ast::{extract_vulgar_frac, paren_contents, unwrap_parens};
 use super::tokens::{
     bold_map, cal_map, double_map, frak_map, italic_map, left_bracket_str, mono_map,
     right_bracket_str, sans_map, subscript_char, superscript_char, symbol_str,
@@ -195,36 +195,56 @@ macro_rules! script_func {
     };
 }
 
-macro_rules! sgroup {
-    ($expr:pat) => {
-        Simple::Group(Group { expr: $expr, .. })
-    };
-}
-
-macro_rules! xnum {
-    ($expr:expr, $num:pat) => {
-        matches!(
-            **$expr,
-            [Intermediate::ScriptFunc(script_func!(num!($num)))]
-        )
-    };
-}
-
-macro_rules! xiden {
-    ($expr:expr, $num:pat) => {
-        matches!(
-            **$expr,
-            [Intermediate::ScriptFunc(script_func!(iden!($num)))]
-        )
-    };
-}
-
 fn only<T>(mut iter: impl Iterator<Item = T>) -> Option<T> {
     let first = iter.next();
     if iter.next().is_none() { first } else { None }
 }
 
+fn combining_letter(letter: &str) -> Option<char> {
+    match letter {
+        "a" => Some('\u{0363}'),
+        "e" => Some('\u{0364}'),
+        "i" => Some('\u{0365}'),
+        "o" => Some('\u{0366}'),
+        "u" => Some('\u{0367}'),
+        "c" => Some('\u{0368}'),
+        "d" => Some('\u{0369}'),
+        "h" => Some('\u{036a}'),
+        "m" => Some('\u{036b}'),
+        "r" => Some('\u{036c}'),
+        "t" => Some('\u{036d}'),
+        "v" => Some('\u{036e}'),
+        "x" => Some('\u{036f}'),
+        _ => None,
+    }
+}
+
+fn root_char(index: &Simple<'_>) -> Option<char> {
+    match index {
+        num!("2") => Some('√'),
+        num!("3") => Some('∛'),
+        num!("4") => Some('∜'),
+        _ => None,
+    }
+}
+
 impl Conf {
+    pub(crate) fn stripped<'s, 'a>(self, simple: &'s Simple<'a>) -> Option<&'s Expression<'a>> {
+        if self.strip_brackets {
+            paren_contents(simple)
+        } else {
+            None
+        }
+    }
+
+    fn unwrap_single<'s, 'a>(self, simple: &'s Simple<'a>) -> &'s Simple<'a> {
+        if self.strip_brackets {
+            unwrap_parens(simple)
+        } else {
+            simple
+        }
+    }
+
     fn inline_simplefunc(
         self,
         simple: &SimpleFunc<'_>,
@@ -253,36 +273,20 @@ impl Conf {
         op: &str,
         first: &Simple<'_>,
         arg: &Simple<'_>,
-        chr: char,
+        mark: char,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
-        match arg {
-            sgroup!(expr) if self.strip_brackets => {
-                let mut single = SingleChar::default();
-                if self
-                    .inline_expression(expr, &mut out.onto(&mut single))
-                    .is_ok()
-                    && let Some(res) = single.0
-                {
-                    // res is already styled; write to inner so the font isn't re-applied
-                    out.inner.write_char(res)?;
-                    out.write_char(chr)
-                } else {
-                    self.inline_bgeneric(op, first, arg, out)
-                }
-            }
-            arg => {
-                let mut single = SingleChar::default();
-                if self.inline_simple(arg, &mut out.onto(&mut single)).is_ok()
-                    && let Some(res) = single.0
-                {
-                    // res is already styled; write to inner so the font isn't re-applied
-                    out.inner.write_char(res)?;
-                    out.write_char(chr)
-                } else {
-                    self.inline_bgeneric(op, first, arg, out)
-                }
-            }
+        let mut single = SingleChar::default();
+        if self
+            .inline_simple_stripped(arg, &mut out.onto(&mut single))
+            .is_ok()
+            && let Some(res) = single.0
+        {
+            // res is already styled; write to inner so the font isn't re-applied
+            out.inner.write_char(res)?;
+            out.write_char(mark)
+        } else {
+            self.inline_bgeneric(op, first, arg, out)
         }
     }
 
@@ -294,13 +298,9 @@ impl Conf {
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
         let mut buf = SmallBuf::default();
-        let scan = match first {
-            sgroup!(expr) if self.strip_brackets => {
-                self.inline_expression(expr, &mut out.onto(&mut buf))
-            }
-            f => self.inline_simple(f, &mut out.onto(&mut buf)),
-        };
-        if scan.is_ok()
+        if self
+            .inline_simple_stripped(first, &mut out.onto(&mut buf))
+            .is_ok()
             && let Some(s) = buf.as_str()
             && let Some(c) = match s {
                 "∘" => Some('\u{2257}'),
@@ -332,111 +332,44 @@ impl Conf {
         self.inline_simple(second, out)
     }
 
-    #[allow(clippy::too_many_lines)]
+    fn inline_overset(
+        self,
+        op: &str,
+        over: &Simple<'_>,
+        base: &Simple<'_>,
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
+        if let iden!(letter) = self.unwrap_single(over)
+            && let Some(mark) = combining_letter(letter)
+        {
+            self.inline_cover(op, over, base, mark, out)
+        } else if matches!(base, symb!("=")) {
+            self.inline_equals(op, over, base, out)
+        } else {
+            self.inline_bgeneric(op, over, base, out)
+        }
+    }
+
     pub(crate) fn inline_simplebinary(
         self,
         simple: &SimpleBinary<'_>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
-        let sb = self.strip_brackets;
         match (simple.op, simple.first(), simple.second()) {
-            // roots
-            ("root", num!("2"), arg) => self.inline_root('√', arg, out),
-            ("root", num!("3"), arg) => self.inline_root('∛', arg, out),
-            ("root", num!("4"), arg) => self.inline_root('∜', arg, out),
-            ("root", sgroup!(expr), arg) if xnum!(expr, "2") => self.inline_root('√', arg, out),
-            ("root", sgroup!(expr), arg) if xnum!(expr, "3") => self.inline_root('∛', arg, out),
-            ("root", sgroup!(expr), arg) if xnum!(expr, "4") => self.inline_root('∜', arg, out),
-            // frac
+            ("root", index, arg) => {
+                // the index is never shown as-is, so its brackets are always syntax
+                if let Some(root) = root_char(unwrap_parens(index)) {
+                    self.inline_root(root, arg, out)
+                } else {
+                    self.inline_bgeneric(simple.op, index, arg, out)
+                }
+            }
             ("frac", numer, denom) => self.inline_simplefrac(numer, denom, out).or_else(|_| {
                 self.inline_simple(numer, out)?;
                 out.write_char('/')?;
                 self.inline_simple(denom, out)
             }),
-            // stackrel / overset combining
-            (o @ ("stackrel" | "overset"), f @ iden!("a"), a) => {
-                self.inline_cover(o, f, a, '\u{0363}', out)
-            }
-            (o @ ("stackrel" | "overset"), f @ iden!("e"), a) => {
-                self.inline_cover(o, f, a, '\u{0364}', out)
-            }
-            (o @ ("stackrel" | "overset"), f @ iden!("i"), a) => {
-                self.inline_cover(o, f, a, '\u{0365}', out)
-            }
-            (o @ ("stackrel" | "overset"), f @ iden!("o"), a) => {
-                self.inline_cover(o, f, a, '\u{0366}', out)
-            }
-            (o @ ("stackrel" | "overset"), f @ iden!("u"), a) => {
-                self.inline_cover(o, f, a, '\u{0367}', out)
-            }
-            (o @ ("stackrel" | "overset"), f @ iden!("c"), a) => {
-                self.inline_cover(o, f, a, '\u{0368}', out)
-            }
-            (o @ ("stackrel" | "overset"), f @ iden!("d"), a) => {
-                self.inline_cover(o, f, a, '\u{0369}', out)
-            }
-            (o @ ("stackrel" | "overset"), f @ iden!("h"), a) => {
-                self.inline_cover(o, f, a, '\u{036a}', out)
-            }
-            (o @ ("stackrel" | "overset"), f @ iden!("m"), a) => {
-                self.inline_cover(o, f, a, '\u{036b}', out)
-            }
-            (o @ ("stackrel" | "overset"), f @ iden!("r"), a) => {
-                self.inline_cover(o, f, a, '\u{036c}', out)
-            }
-            (o @ ("stackrel" | "overset"), f @ iden!("t"), a) => {
-                self.inline_cover(o, f, a, '\u{036d}', out)
-            }
-            (o @ ("stackrel" | "overset"), f @ iden!("v"), a) => {
-                self.inline_cover(o, f, a, '\u{036e}', out)
-            }
-            (o @ ("stackrel" | "overset"), f @ iden!("x"), a) => {
-                self.inline_cover(o, f, a, '\u{036f}', out)
-            }
-            ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "a") => {
-                self.inline_cover(simple.op, simple.first(), arg, '\u{0363}', out)
-            }
-            ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "e") => {
-                self.inline_cover(simple.op, simple.first(), arg, '\u{0364}', out)
-            }
-            ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "i") => {
-                self.inline_cover(simple.op, simple.first(), arg, '\u{0365}', out)
-            }
-            ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "o") => {
-                self.inline_cover(simple.op, simple.first(), arg, '\u{0366}', out)
-            }
-            ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "u") => {
-                self.inline_cover(simple.op, simple.first(), arg, '\u{0367}', out)
-            }
-            ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "c") => {
-                self.inline_cover(simple.op, simple.first(), arg, '\u{0368}', out)
-            }
-            ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "d") => {
-                self.inline_cover(simple.op, simple.first(), arg, '\u{0369}', out)
-            }
-            ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "h") => {
-                self.inline_cover(simple.op, simple.first(), arg, '\u{036a}', out)
-            }
-            ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "m") => {
-                self.inline_cover(simple.op, simple.first(), arg, '\u{036b}', out)
-            }
-            ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "r") => {
-                self.inline_cover(simple.op, simple.first(), arg, '\u{036c}', out)
-            }
-            ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "t") => {
-                self.inline_cover(simple.op, simple.first(), arg, '\u{036d}', out)
-            }
-            ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "v") => {
-                self.inline_cover(simple.op, simple.first(), arg, '\u{036e}', out)
-            }
-            ("stackrel" | "overset", sgroup!(exp), arg) if sb && xiden!(exp, "x") => {
-                self.inline_cover(simple.op, simple.first(), arg, '\u{036f}', out)
-            }
-            // stackrel / overset equals
-            ("stackrel" | "overset", arg, symb!("=")) => {
-                self.inline_equals(simple.op, arg, simple.second(), out)
-            }
-            // generic
+            ("stackrel" | "overset", over, base) => self.inline_overset(simple.op, over, base, out),
             (op, first, second) => self.inline_bgeneric(op, first, second, out),
         }
     }
@@ -447,11 +380,7 @@ impl Conf {
         arg: &Simple<'_>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
-        let mut w = out.with_font(font);
-        match arg {
-            sgroup!(expr) if self.strip_brackets => self.inline_expression(expr, &mut w),
-            arg => self.inline_simple(arg, &mut w),
-        }
+        self.inline_simple_stripped(arg, &mut out.with_font(font))
     }
 
     fn inline_sfunc(
@@ -462,10 +391,7 @@ impl Conf {
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
         out.write_str(open)?;
-        match arg {
-            sgroup!(expr) if self.strip_brackets => self.inline_expression(expr, out)?,
-            arg => self.inline_simple(arg, out)?,
-        }
+        self.inline_simple_stripped(arg, out)?;
         out.write_str(close)
     }
 
@@ -475,11 +401,7 @@ impl Conf {
         arg: &Simple<'_>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
-        let mut w = out.with_modifier(chr);
-        match arg {
-            sgroup!(expr) if self.strip_brackets => self.inline_expression(expr, &mut w),
-            arg => self.inline_simple(arg, &mut w),
-        }
+        self.inline_simple_stripped(arg, &mut out.with_modifier(chr))
     }
 
     fn inline_char_modi(
@@ -490,41 +412,23 @@ impl Conf {
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
         // Try precomposition for single-char arguments (check AST, not rendered output)
-        if let Some(base) = match arg {
-            &Simple::Ident(s) | &Simple::Number(s) => only(s.chars()),
-            sgroup!(expr) if self.strip_brackets => extract_single_char(expr),
-            _ => None,
-        } && let Some(precomposed) = compose(base, chr)
+        if let &Simple::Ident(text) | &Simple::Number(text) = self.unwrap_single(arg)
+            && let Some(base) = only(text.chars())
+            && let Some(precomposed) = compose(base, chr)
         {
             out.write_char(precomposed)
         } else {
-            match arg {
-                sgroup!(expr) if self.strip_brackets => {
-                    let mut single = SingleChar::default();
-                    if self
-                        .inline_expression(expr, &mut out.onto(&mut single))
-                        .is_ok()
-                        && let Some(res) = single.0
-                    {
-                        // res is already styled; write to inner so the font isn't re-applied
-                        out.inner.write_char(res)?;
-                        out.write_char(chr)
-                    } else {
-                        self.inline_ugeneric(op, arg, out)
-                    }
-                }
-                arg => {
-                    let mut single = SingleChar::default();
-                    if self.inline_simple(arg, &mut out.onto(&mut single)).is_ok()
-                        && let Some(res) = single.0
-                    {
-                        // res is already styled; write to inner so the font isn't re-applied
-                        out.inner.write_char(res)?;
-                        out.write_char(chr)
-                    } else {
-                        self.inline_ugeneric(op, arg, out)
-                    }
-                }
+            let mut single = SingleChar::default();
+            if self
+                .inline_simple_stripped(arg, &mut out.onto(&mut single))
+                .is_ok()
+                && let Some(res) = single.0
+            {
+                // res is already styled; write to inner so the font isn't re-applied
+                out.inner.write_char(res)?;
+                out.write_char(chr)
+            } else {
+                self.inline_ugeneric(op, arg, out)
             }
         }
     }
@@ -634,9 +538,10 @@ impl Conf {
         simple: &Simple<'_>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
-        match simple {
-            sgroup!(expr) if self.strip_brackets => self.inline_expression(expr, out),
-            simple => self.inline_simple(simple, out),
+        if let Some(expr) = self.stripped(simple) {
+            self.inline_expression(expr, out)
+        } else {
+            self.inline_simple(simple, out)
         }
     }
 
@@ -725,140 +630,67 @@ impl Conf {
         }
     }
 
-    fn inline_sone(
+    fn inline_scriptfunc_stripped(
         self,
-        _num: &Simple<'_>,
-        den: &Simple<'_>,
+        func: &ScriptFunc<'_>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
-        let mut sink = Sink;
-        match den {
-            sgroup!(expr) if self.strip_brackets => {
-                if let Some(sconf) = out.conf.with_sub()
-                    && self
-                        .inline_expression(expr, &mut sconf.wrap(&mut sink))
-                        .is_ok()
-                {
-                    out.write_char('⅟')?;
-                    self.inline_expression(expr, &mut sconf.wrap(out.inner))
-                } else {
-                    Err(fmt::Error)
-                }
-            }
-            den => {
-                if let Some(sconf) = out.conf.with_sub()
-                    && self.inline_simple(den, &mut sconf.wrap(&mut sink)).is_ok()
-                {
-                    out.write_char('⅟')?;
-                    let mut w = sconf.wrap(out.inner);
-                    self.inline_simple(den, &mut w)
-                } else {
-                    Err(fmt::Error)
-                }
-            }
+        match func {
+            script_func!(simple) => self.inline_simple_stripped(simple, out),
+            func => self.inline_scriptfunc(func, out),
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    fn inline_sone(self, den: &Simple<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
+        if let Some(sconf) = out.conf.with_sub()
+            && self
+                .inline_simple_stripped(den, &mut sconf.wrap(&mut Sink))
+                .is_ok()
+        {
+            out.write_char('⅟')?;
+            self.inline_simple_stripped(den, &mut sconf.wrap(out.inner))
+        } else {
+            Err(fmt::Error)
+        }
+    }
+
     pub(crate) fn inline_simplefrac(
         self,
         numer: &Simple<'_>,
         denom: &Simple<'_>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
-        // simple vulgar frac
         if self.vulgar_fracs
             && let Some(frac) = extract_vulgar_frac(numer, denom, self.strip_brackets)
         {
-            return out.write_char(frac);
-        }
-        let mut sink = Sink;
-
-        let vsf = self.vulgar_fracs && self.script_fracs;
-        match (numer, denom) {
-            // one fracs
-            (num!("1"), den) if vsf => self.inline_sone(numer, den, out),
-            (sgroup!(num), den) if vsf && self.strip_brackets && xnum!(num, "1") => {
-                self.inline_sone(numer, den, out)
-            }
-            // normal
-            (sgroup!(num), sgroup!(den)) if self.strip_brackets && self.script_fracs => {
-                if let Some(sup_conf) = out.conf.with_sup()
-                    && self
-                        .inline_expression(num, &mut sup_conf.wrap(&mut sink))
-                        .is_ok()
-                    && let Some(sub_conf) = out.conf.with_sub()
-                    && self
-                        .inline_expression(den, &mut sub_conf.wrap(&mut sink))
-                        .is_ok()
-                {
-                    self.inline_expression(num, &mut sup_conf.wrap(out.inner))?;
-                    out.write_char('⁄')?;
-                    self.inline_expression(den, &mut sub_conf.wrap(out.inner))
-                } else {
-                    Err(fmt::Error)
-                }
-            }
-            (num, sgroup!(den)) if self.strip_brackets && self.script_fracs => {
-                if let Some(sup_conf) = out.conf.with_sup()
-                    && self
-                        .inline_simple(num, &mut sup_conf.wrap(&mut sink))
-                        .is_ok()
-                    && let Some(sub_conf) = out.conf.with_sub()
-                    && self
-                        .inline_expression(den, &mut sub_conf.wrap(&mut sink))
-                        .is_ok()
-                {
-                    self.inline_simple(num, &mut sup_conf.wrap(out.inner))?;
-                    out.write_char('⁄')?;
-                    self.inline_expression(den, &mut sub_conf.wrap(out.inner))
-                } else {
-                    Err(fmt::Error)
-                }
-            }
-            (sgroup!(num), den) if self.strip_brackets && self.script_fracs => {
-                if let Some(sup_conf) = out.conf.with_sup()
-                    && self
-                        .inline_expression(num, &mut sup_conf.wrap(&mut sink))
-                        .is_ok()
-                    && let Some(sub_conf) = out.conf.with_sub()
-                    && self
-                        .inline_simple(den, &mut sub_conf.wrap(&mut sink))
-                        .is_ok()
-                {
-                    self.inline_expression(num, &mut sup_conf.wrap(out.inner))?;
-                    out.write_char('⁄')?;
-                    self.inline_simple(den, &mut sub_conf.wrap(out.inner))
-                } else {
-                    Err(fmt::Error)
-                }
-            }
-            (num, den) => {
-                if self.script_fracs
-                    && let Some(sup_conf) = out.conf.with_sup()
-                    && self
-                        .inline_simple(num, &mut sup_conf.wrap(&mut sink))
-                        .is_ok()
-                    && let Some(sub_conf) = out.conf.with_sub()
-                    && self
-                        .inline_simple(den, &mut sub_conf.wrap(&mut sink))
-                        .is_ok()
-                {
-                    self.inline_simple(num, &mut sup_conf.wrap(out.inner))?;
-                    out.write_char('⁄')?;
-                    self.inline_simple(den, &mut sub_conf.wrap(out.inner))
-                } else {
-                    Err(fmt::Error)
-                }
-            }
+            out.write_char(frac)
+        } else if self.vulgar_fracs
+            && self.script_fracs
+            && matches!(self.unwrap_single(numer), num!("1"))
+        {
+            self.inline_sone(denom, out)
+        } else if self.script_fracs
+            && let Some(sup_conf) = out.conf.with_sup()
+            && self
+                .inline_simple_stripped(numer, &mut sup_conf.wrap(&mut Sink))
+                .is_ok()
+            && let Some(sub_conf) = out.conf.with_sub()
+            && self
+                .inline_simple_stripped(denom, &mut sub_conf.wrap(&mut Sink))
+                .is_ok()
+        {
+            self.inline_simple_stripped(numer, &mut sup_conf.wrap(out.inner))?;
+            out.write_char('⁄')?;
+            self.inline_simple_stripped(denom, &mut sub_conf.wrap(out.inner))
+        } else {
+            Err(fmt::Error)
         }
     }
 
     fn inline_fone(self, den: &ScriptFunc<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
-        let mut sink = Sink;
         if let Some(sconf) = out.conf.with_sub()
             && self
-                .inline_scriptfunc(den, &mut sconf.wrap(&mut sink))
+                .inline_scriptfunc(den, &mut sconf.wrap(&mut Sink))
                 .is_ok()
         {
             out.write_char('⅟')?;
@@ -868,16 +700,12 @@ impl Conf {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(crate) fn inline_frac(
         self,
         frac: &Frac<'_>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
-        let mut sink = Sink;
-        let sv = self.script_fracs && self.vulgar_fracs;
         match (&frac.numer, &frac.denom) {
-            // simple frac
             (script_func!(num), script_func!(den)) => {
                 self.inline_simplefrac(num, den, out).or_else(|_| {
                     self.inline_simple(num, out)?;
@@ -885,66 +713,30 @@ impl Conf {
                     self.inline_simple(den, out)
                 })
             }
-            // one vulgar
-            (script_func!(num!("1")), den) if sv => self.inline_fone(den, out).or_else(|_| {
-                out.write_str("1/")?;
-                self.inline_scriptfunc(den, out)
-            }),
-            (script_func!(sgroup!(num)), den) if sv && self.strip_brackets && xnum!(num, "1") => {
+            (script_func!(num), den)
+                if self.script_fracs
+                    && self.vulgar_fracs
+                    && matches!(self.unwrap_single(num), num!("1")) =>
+            {
                 self.inline_fone(den, out).or_else(|_| {
                     out.write_str("1/")?;
                     self.inline_scriptfunc(den, out)
                 })
             }
-            // normal fractions
-            (script_func!(sgroup!(num)), den) if self.strip_brackets && self.script_fracs => {
-                if let Some(sup_conf) = out.conf.with_sup()
-                    && self
-                        .inline_expression(num, &mut sup_conf.wrap(&mut sink))
-                        .is_ok()
-                    && let Some(sub_conf) = out.conf.with_sub()
-                    && self
-                        .inline_scriptfunc(den, &mut sub_conf.wrap(&mut sink))
-                        .is_ok()
-                {
-                    self.inline_expression(num, &mut sup_conf.wrap(out.inner))?;
-                    out.write_char('⁄')?;
-                    self.inline_scriptfunc(den, &mut sub_conf.wrap(out.inner))
-                } else {
-                    Err(fmt::Error)
-                }
-            }
-            (num, script_func!(sgroup!(den))) if self.strip_brackets && self.script_fracs => {
-                if let Some(sup_conf) = out.conf.with_sup()
-                    && self
-                        .inline_scriptfunc(num, &mut sup_conf.wrap(&mut sink))
-                        .is_ok()
-                    && let Some(sub_conf) = out.conf.with_sub()
-                    && self
-                        .inline_expression(den, &mut sub_conf.wrap(&mut sink))
-                        .is_ok()
-                {
-                    self.inline_scriptfunc(num, &mut sup_conf.wrap(out.inner))?;
-                    out.write_char('⁄')?;
-                    self.inline_expression(den, &mut sub_conf.wrap(out.inner))
-                } else {
-                    Err(fmt::Error)
-                }
-            }
             (num, den) => {
                 if self.script_fracs
                     && let Some(sup_conf) = out.conf.with_sup()
                     && self
-                        .inline_scriptfunc(num, &mut sup_conf.wrap(&mut sink))
+                        .inline_scriptfunc_stripped(num, &mut sup_conf.wrap(&mut Sink))
                         .is_ok()
                     && let Some(sub_conf) = out.conf.with_sub()
                     && self
-                        .inline_scriptfunc(den, &mut sub_conf.wrap(&mut sink))
+                        .inline_scriptfunc_stripped(den, &mut sub_conf.wrap(&mut Sink))
                         .is_ok()
                 {
-                    self.inline_scriptfunc(num, &mut sup_conf.wrap(out.inner))?;
+                    self.inline_scriptfunc_stripped(num, &mut sup_conf.wrap(out.inner))?;
                     out.write_char('⁄')?;
-                    self.inline_scriptfunc(den, &mut sub_conf.wrap(out.inner))
+                    self.inline_scriptfunc_stripped(den, &mut sub_conf.wrap(out.inner))
                 } else {
                     Err(fmt::Error)
                 }
@@ -1018,10 +810,10 @@ mod tests {
         let res = opts.parse("(1)/2").to_string();
         assert_eq!(res, "½");
 
-        let res = opts.parse("7/[8]").to_string();
+        let res = opts.parse("7/(8)").to_string();
         assert_eq!(res, "⅞");
 
-        let res = opts.parse("{a} / (s)").to_string();
+        let res = opts.parse("{:a:} / (s)").to_string();
         assert_eq!(res, "℁");
     }
 
@@ -1049,10 +841,10 @@ mod tests {
         let res = opts.parse("(y) / x").to_string();
         assert_eq!(res, "ʸ⁄ₓ");
 
-        let res = opts.parse("y / [x]").to_string();
+        let res = opts.parse("y / (x)").to_string();
         assert_eq!(res, "ʸ⁄ₓ");
 
-        let res = opts.parse("(y)/[x]").to_string();
+        let res = opts.parse("(y)/(x)").to_string();
         assert_eq!(res, "ʸ⁄ₓ");
     }
 
@@ -1105,7 +897,7 @@ mod tests {
         let res = super::super::parse_unicode("dot x").to_string();
         assert_eq!(res, "ẋ");
 
-        let res = super::super::parse_unicode("dot{x}").to_string();
+        let res = super::super::parse_unicode("dot(x)").to_string();
         assert_eq!(res, "ẋ");
 
         let res = super::super::parse_unicode("norm x").to_string();
@@ -1123,7 +915,7 @@ mod tests {
         let res = super::super::parse_unicode("root 3 x").to_string();
         assert_eq!(res, "∛x");
 
-        let res = super::super::parse_unicode("root {4} x").to_string();
+        let res = super::super::parse_unicode("root (4) x").to_string();
         assert_eq!(res, "∜x");
 
         let res = super::super::parse_unicode("stackrel *** =").to_string();
@@ -1132,7 +924,7 @@ mod tests {
         let res = super::super::parse_unicode("overset a x").to_string();
         assert_eq!(res, "x\u{0363}");
 
-        let res = super::super::parse_unicode("overset (e) {y}").to_string();
+        let res = super::super::parse_unicode("overset (e) (y)").to_string();
         assert_eq!(res, "y\u{0364}");
 
         let res = super::super::parse_unicode("oversetasinx").to_string();
@@ -1615,6 +1407,28 @@ mod tests {
         // a bare (ungrouped) symbol argument takes the combining modifier directly
         let res = super::super::parse_unicode("vec*").to_string();
         assert_eq!(res, "\u{22c5}\u{20d7}");
+    }
+
+    #[test]
+    fn only_grouping_brackets_are_stripped() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        // bars, angles, floors and ceilings carry meaning
+        assert_eq!(render("|x|/2"), "|x|/2");
+        assert_eq!(render("<<x>>/2"), "⟨x⟩/2");
+        assert_eq!(render("x_|a|"), "x_|a|");
+        assert_eq!(render("bb|x|"), "|𝐱|");
+        assert_eq!(render("|__x__|/2"), "⌊x⌋/2");
+        assert_eq!(render("|~x~|/2"), "⌈x⌉/2");
+        assert_eq!(render("hat|x|"), "hat |x|");
+        // parentheses, square and curly brackets only group
+        assert_eq!(render("x_(a)"), "xₐ");
+        assert_eq!(render("x_[a]"), "xₐ");
+        assert_eq!(render("x_{:a:}"), "xₐ");
+        assert_eq!(render("bb(x)"), "𝐱");
+        assert_eq!(render("bb{x}"), "𝐱");
+        assert_eq!(render("7/[8]"), "⅞");
+        assert_eq!(render("{a} / (s)"), "℁");
+        assert_eq!(render("dot{x}"), "ẋ");
     }
 
     #[test]
