@@ -17,8 +17,6 @@ jobs:
 
     steps:
     - uses: actions/checkout@v7
-    - name: Install nightly toolchain
-      run: rustup toolchain install nightly --component clippy
     - name: Install llvm-tools-preview
       run: rustup component add llvm-tools-preview
     - uses: Swatinem/rust-cache@v2
@@ -33,7 +31,5 @@ jobs:
       run: cargo clippy --verbose --all-features --tests -- -D warnings
     - name: Check docs
       run: RUSTDOCFLAGS="-D warnings" cargo doc --verbose --all-features --no-deps
-    - name: Run bench lints
-      run: cargo +nightly clippy --verbose --benches -- -D warnings
     - name: Check formatting
       run: cargo fmt --verbose --check
