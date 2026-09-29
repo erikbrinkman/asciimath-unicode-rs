@@ -1,6 +1,6 @@
 //! Definitions of the relevant tokens and conversions between them
 
-use asciimath_parser::prefix_map::QpTriePrefixMap;
+use asciimath_parser::prefix_map::HashPrefixMap;
 use asciimath_parser::tree::Expression;
 use asciimath_parser::{Token, Tokenizer};
 use emojis::SkinTone;
@@ -88,7 +88,7 @@ const UNICODE_TOKENS: [(&str, Token); 399] = tokens!(
     Ident => ":=";
 );
 
-pub static TOKEN_MAP: LazyLock<QpTriePrefixMap<Cow<'static, str>, Token>> = LazyLock::new(|| {
+pub static TOKEN_MAP: LazyLock<HashPrefixMap<Cow<'static, str>, Token>> = LazyLock::new(|| {
     UNICODE_TOKENS
         .into_iter()
         .map(|(name, tok)| (Cow::Borrowed(name), tok))

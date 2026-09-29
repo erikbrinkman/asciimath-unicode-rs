@@ -5,7 +5,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::Conf;
 use super::ast::{func_hugs_argument, hugs_argument, is_spaced_operator, needs_space};
-use super::inline::{Mapper, MapperConf};
+use super::inline::{Mapper, MapperConf, column_rules};
 use super::tokens::{left_bracket_str, right_bracket_str, subscript_char, superscript_char};
 
 use asciimath_parser::tree::{
@@ -46,6 +46,15 @@ impl Block {
             lines: vec![" ".repeat(n)],
             baseline: 0,
             width: n,
+        }
+    }
+
+    /// The same line repeated to fill a block `height` tall
+    fn repeated(line: String, height: usize, baseline: usize) -> Self {
+        Block {
+            width: UnicodeWidthStr::width(&*line),
+            lines: vec![line; height],
+            baseline,
         }
     }
 
@@ -309,8 +318,15 @@ fn tall_bracket(bracket: &str, height: usize, pieces: fn(&str, usize) -> Bracket
     }
 }
 
-fn is_spaced_ident(id: &str) -> bool {
-    matches!(id, "+" | "-" | "=" | ">" | "<" | "≤" | "≥" | "≠")
+/// One line of the separator at a matrix column boundary: `rules` vertical lines, with the column
+/// gap around them unless the boundary sits against a bracket
+fn column_separator(rules: usize, boundary: usize, num_cols: usize) -> String {
+    let gap = if boundary == 0 || boundary == num_cols {
+        ""
+    } else {
+        " "
+    };
+    format!("{gap}{}{gap}", "\u{2502}".repeat(rules))
 }
 
 fn is_sign(inter: &Intermediate<'_>) -> bool {
@@ -318,7 +334,7 @@ fn is_sign(inter: &Intermediate<'_>) -> bool {
         inter,
         Intermediate::ScriptFunc(ScriptFunc::Simple(SimpleScript {
             simple: Simple::Symbol("+" | "-" | "+-" | "pm" | "-+" | "mp")
-                | Simple::Ident("+" | "-"),
+                | Simple::Operator("+" | "-"),
             script: Script::None,
         }))
     )
@@ -327,13 +343,9 @@ fn is_sign(inter: &Intermediate<'_>) -> bool {
 fn inter_is_spaced_op(inter: &Intermediate<'_>) -> bool {
     match inter {
         Intermediate::ScriptFunc(ScriptFunc::Simple(SimpleScript {
-            simple: Simple::Symbol(sym),
+            simple: Simple::Symbol(sym) | Simple::Operator(sym),
             script: Script::None,
         })) => is_spaced_operator(sym),
-        Intermediate::ScriptFunc(ScriptFunc::Simple(SimpleScript {
-            simple: Simple::Ident(id),
-            script: Script::None,
-        })) => is_spaced_ident(id),
         _ => false,
     }
 }
@@ -539,7 +551,6 @@ impl Conf {
 
     fn block_matrix(self, matrix: &Matrix<'_>) -> Block {
         let num_cols = matrix.num_cols();
-        let sep_width = 2;
 
         let rows: Vec<Vec<Block>> = matrix
             .rows()
@@ -553,34 +564,43 @@ impl Conf {
                     .unwrap_or_default()
             })
             .collect();
-        let total_width = col_widths.iter().sum::<usize>() + (num_cols - 1) * sep_width;
         // rows of tall cells are hard to tell apart without a gap
         let spaced = rows.iter().flatten().any(Block::is_multiline);
+        let last_row = rows.len() - 1;
 
-        let mut grid_lines: Vec<String> = Vec::new();
-        for row in rows {
-            if spaced && !grid_lines.is_empty() {
-                grid_lines.push(" ".repeat(total_width));
-            }
-            let above = row
-                .iter()
-                .map(|cell| cell.baseline)
-                .max()
-                .unwrap_or_default();
-            let below = row
-                .iter()
-                .map(|cell| cell.height() - 1 - cell.baseline)
-                .max()
-                .unwrap_or_default();
-            let row_block = row
-                .into_iter()
-                .zip(&col_widths)
-                .map(|(cell, &width)| cell.pad_vertical(above, below).pad_center(width))
-                .reduce(|left, right| left.beside(Block::space(sep_width)).beside(right))
-                .unwrap_or_else(|| unreachable!("must have at least one col"));
-            grid_lines.extend(row_block.lines);
-        }
+        let row_blocks: Vec<Block> = rows
+            .into_iter()
+            .enumerate()
+            .map(|(index, row)| {
+                let above = row
+                    .iter()
+                    .map(|cell| cell.baseline)
+                    .max()
+                    .unwrap_or_default();
+                let below = row
+                    .iter()
+                    .map(|cell| cell.height() - 1 - cell.baseline)
+                    .max()
+                    .unwrap_or_default()
+                    + usize::from(spaced && index != last_row);
+                let height = above + below + 1;
+                let rule = |boundary| {
+                    let line = column_separator(column_rules(matrix, boundary), boundary, num_cols);
+                    Block::repeated(line, height, above)
+                };
+                let mut row_block = rule(0);
+                for (col, (cell, &width)) in row.into_iter().zip(&col_widths).enumerate() {
+                    if col > 0 {
+                        row_block = row_block.beside(rule(col));
+                    }
+                    row_block = row_block.beside(cell.pad_vertical(above, below).pad_center(width));
+                }
+                row_block.beside(rule(num_cols))
+            })
+            .collect();
 
+        let total_width = row_blocks.first().map_or(0, |row| row.width);
+        let grid_lines: Vec<String> = row_blocks.into_iter().flat_map(|row| row.lines).collect();
         let grid = Block {
             baseline: grid_lines.len() / 2,
             width: total_width,
@@ -913,6 +933,21 @@ mod tests {
         assert_eq!(
             result,
             "⎡a   ⎤\n⎢─  c⎥\n⎢b   ⎥\n⎢    ⎥\n⎢   e⎥\n⎢d  ─⎥\n⎣   f⎦"
+        );
+    }
+
+    #[test]
+    fn matrix_column_lines() {
+        assert_eq!(render_block("[(a,|,b),(c,|,d)]"), "⎡a │ b⎤\n⎣c │ d⎦");
+        assert_eq!(render_block("[(|,a,b,|),(|,c,d,|)]"), "⎡│a  b│⎤\n⎣│c  d│⎦");
+        assert_eq!(render_block("[(a,|,|,b),(c,|,|,d)]"), "⎡a ││ b⎤\n⎣c ││ d⎦");
+    }
+
+    #[test]
+    fn matrix_column_line_spans_tall_rows() {
+        assert_eq!(
+            render_block("[(x/y,|,b),(c,|,d)]"),
+            "⎡x │  ⎤\n⎢─ │ b⎥\n⎢y │  ⎥\n⎢  │  ⎥\n⎣c │ d⎦"
         );
     }
 
