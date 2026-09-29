@@ -557,6 +557,14 @@ impl Conf {
         }
     }
 
+    /// `script` with its brackets stripped and every char mapped through `conf`, if all map
+    pub(crate) fn mapped_script(self, script: &Simple<'_>, conf: MapperConf) -> Option<String> {
+        let mut text = String::new();
+        self.inline_simple_stripped(script, &mut conf.wrap(&mut text))
+            .ok()?;
+        Some(text)
+    }
+
     /// Write `script` through `conf` when every char maps, otherwise after a literal `marker`
     fn inline_sub_or_sup(
         self,
