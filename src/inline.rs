@@ -187,6 +187,12 @@ macro_rules! iden {
     };
 }
 
+macro_rules! oper {
+    ($op:pat) => {
+        Simple::Operator($op)
+    };
+}
+
 macro_rules! symb {
     ($sym:pat) => {
         Simple::Symbol($sym)
@@ -231,6 +237,14 @@ fn combining_letter(letter: &str) -> Option<char> {
         "x" => Some('\u{036f}'),
         _ => None,
     }
+}
+
+/// Whether `simple` is a prefix minus and its operand, which reads badly after `⅟`
+fn is_negated(simple: &Simple<'_>) -> bool {
+    matches!(
+        paren_contents(simple).map(|expr| &**expr),
+        Some([Intermediate::ScriptFunc(script_func!(oper!("-"))), _])
+    )
 }
 
 /// How many vertical lines the matrix draws at a column boundary
@@ -472,20 +486,31 @@ impl Conf {
         match (simple.op, simple.arg()) {
             ("sqrt", arg) => self.inline_root("√", arg, out),
             // fonts
-            ("bb" | "mathbf", arg) => self.inline_font(bold_map, arg, out),
+            ("bb" | "mathbf" | "bold", arg) => self.inline_font(bold_map, arg, out),
             ("bbb" | "mathbb", arg) => self.inline_font(double_map, arg, out),
             ("cc" | "mathcal", arg) => self.inline_font(cal_map, arg, out),
             ("tt" | "mathtt", arg) => self.inline_font(mono_map, arg, out),
             ("fr" | "mathfrak", arg) => self.inline_font(frak_map, arg, out),
             ("sf" | "mathsf", arg) => self.inline_font(sans_map, arg, out),
-            ("it" | "mathit", arg) => self.inline_font(italic_map, arg, out),
+            ("it" | "mathit" | "italic", arg) => self.inline_font(italic_map, arg, out),
+            ("bbit", arg) => self.inline_font(|chr| bold_map(italic_map(chr)), arg, out),
+            ("bbsf", arg) => self.inline_font(|chr| bold_map(sans_map(chr)), arg, out),
+            ("sfit", arg) => self.inline_font(|chr| italic_map(sans_map(chr)), arg, out),
+            ("bbsfit", arg) => {
+                self.inline_font(|chr| bold_map(italic_map(sans_map(chr))), arg, out)
+            }
+            ("bbcc", arg) => self.inline_font(|chr| bold_map(cal_map(chr)), arg, out),
+            ("bbfr", arg) => self.inline_font(|chr| bold_map(frak_map(chr)), arg, out),
             // functions
             ("abs" | "Abs", arg) => self.inline_sfunc("|", arg, "|", out),
             ("ceil", arg) => self.inline_sfunc("⌈", arg, "⌉", out),
             ("floor", arg) => self.inline_sfunc("⌊", arg, "⌋", out),
             ("norm", arg) => self.inline_sfunc("||", arg, "||", out),
+            // any bracket around literal text only delimits it
+            ("text" | "mbox", Simple::Group(group)) => self.inline_expression(&group.expr, out),
+            ("text" | "mbox", arg) => self.inline_simple(arg, out),
             // braces have no plain-text form; their labels arrive as scripts
-            ("text" | "mbox" | "ubrace" | "underbrace" | "obrace" | "overbrace", arg) => {
+            ("ubrace" | "underbrace" | "obrace" | "overbrace", arg) => {
                 self.inline_simple_stripped(arg, out)
             }
             // modifiers
@@ -694,6 +719,7 @@ impl Conf {
         } else if self.vulgar_fracs
             && self.script_fracs
             && matches!(self.unwrap_single(numer), num!("1"))
+            && !is_negated(denom)
         {
             self.inline_sone(denom, out)
         } else if self.script_fracs
@@ -743,7 +769,8 @@ impl Conf {
             (script_func!(num), den)
                 if self.script_fracs
                     && self.vulgar_fracs
-                    && matches!(self.unwrap_single(num), num!("1")) =>
+                    && matches!(self.unwrap_single(num), num!("1"))
+                    && !matches!(den, script_func!(den) if is_negated(den)) =>
             {
                 self.inline_fone(den, out).or_else(|_| {
                     out.write_str("1/")?;
@@ -1524,6 +1551,61 @@ mod tests {
         assert_eq!(render("x = -1"), "x=-1");
         assert_eq!(render("f(x)=x^2"), "f(x)=x²");
         assert_eq!(render("a b"), "ab");
+    }
+
+    #[test]
+    fn literal_text() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("text(hello world)"), "hello world");
+        assert_eq!(render("mbox[a + b]"), "a + b");
+        assert_eq!(render("text{ x }"), " x ");
+        assert_eq!(render("text(a) + 1"), "a+1");
+        let conf = Conf {
+            strip_brackets: false,
+            ..Default::default()
+        };
+        assert_eq!(conf.parse("text(hello world)").to_string(), "hello world");
+    }
+
+    #[test]
+    fn prefix_minus_in_scripts() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("x^-1"), "x⁻¹");
+        assert_eq!(render("e^-x"), "e⁻ˣ");
+        assert_eq!(render("x_-1^-2"), "x₋₁⁻²");
+        assert_eq!(render("sin^-1 x"), "sin⁻¹ x");
+        // a negative denominator is an ordinary fraction, not a reciprocal
+        assert_eq!(render("1/-2"), "¹⁄₋₂");
+        assert_eq!(render("1/-x"), "¹⁄₋ₓ");
+    }
+
+    #[test]
+    fn added_symbols() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("hbar o- dag dagger ddag ddagger"), "ℏ⊖††‡‡");
+        assert_eq!(render("a notequiv b !-= c"), "a≢b≢c");
+        assert_eq!(render("a rightleftharpoons b"), "a⇌b");
+        assert_eq!(
+            render("a notsubset b notsubseteq c notsupset d notsupseteq e"),
+            "a⊄b⊈c⊅d⊉e"
+        );
+        assert_eq!(render("a enspace b thinspace c"), "a\u{2002}b\u{2009}c");
+        assert_eq!(render("arcsec x"), "arcsec x");
+        assert_eq!(render("arccsc(x)"), "arccsc(x)");
+        assert_eq!(render("arccot x"), "arccot x");
+    }
+
+    #[test]
+    fn added_fonts() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("italic(x)"), "𝑥");
+        assert_eq!(render("bold(x)"), "𝐱");
+        assert_eq!(render("bbit(x)"), "𝒙");
+        assert_eq!(render("bbsf(x)"), "𝘅");
+        assert_eq!(render("sfit(x)"), "𝘹");
+        assert_eq!(render("bbsfit(x)"), "𝙭");
+        assert_eq!(render("bbcc(A)"), "𝓐");
+        assert_eq!(render("bbfr(A)"), "𝕬");
     }
 
     #[test]
