@@ -121,7 +121,11 @@ impl<W: fmt::Write + ?Sized> fmt::Write for Mapper<'_, W> {
                     c = font(c);
                 }
                 self.inner.write_char(c)?;
-                if let Some(modifier) = self.conf.modifier {
+                // a line through brackets would suggest they're part of the marked text
+                if let Some(modifier) = self.conf.modifier
+                    && !c.is_whitespace()
+                    && !is_bracket_char(c)
+                {
                     self.inner.write_char(modifier)?;
                 }
             }
@@ -203,6 +207,13 @@ fn only<T>(mut iter: impl Iterator<Item = T>) -> Option<T> {
     if iter.next().is_none() { first } else { None }
 }
 
+fn is_bracket_char(chr: char) -> bool {
+    matches!(
+        chr,
+        '(' | ')' | '[' | ']' | '{' | '}' | '|' | '⟨' | '⟩' | '⌊' | '⌋' | '⌈' | '⌉'
+    )
+}
+
 fn combining_letter(letter: &str) -> Option<char> {
     match letter {
         "a" => Some('\u{0363}'),
@@ -262,61 +273,57 @@ impl Conf {
 
     fn inline_root(
         self,
-        root_char: char,
-        arg: &Simple<'_>,
+        root: &str,
+        radicand: &Simple<'_>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
-        out.write_char(root_char)?;
-        self.inline_simple(arg, out)
+        out.write_str(root)?;
+        self.inline_simple(self.unwrap_single(radicand), out)
     }
 
-    fn inline_cover(
+    fn inline_nroot(
         self,
-        op: &str,
-        first: &Simple<'_>,
-        arg: &Simple<'_>,
-        mark: char,
+        index: &Simple<'_>,
+        radicand: &Simple<'_>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
-        let mut single = SingleChar::default();
-        if self
-            .inline_simple_stripped(arg, &mut out.onto(&mut single))
-            .is_ok()
-            && let Some(res) = single.0
+        // the index is never shown as-is, so its brackets are always syntax
+        if let Some(root) = root_char(unwrap_parens(index)) {
+            let mut buf = [0; 4];
+            self.inline_root(root.encode_utf8(&mut buf), radicand, out)
+        } else if let Some(sup_conf) = out.conf.with_sup()
+            && self
+                .inline_simple_stripped(index, &mut sup_conf.wrap(&mut Sink))
+                .is_ok()
         {
-            // res is already styled; write to inner so the font isn't re-applied
-            out.inner.write_char(res)?;
-            out.write_char(mark)
+            self.inline_simple_stripped(index, &mut sup_conf.wrap(out.inner))?;
+            self.inline_root("√", radicand, out)
         } else {
-            self.inline_bgeneric(op, first, arg, out)
+            self.inline_bgeneric("root", index, radicand, out)
         }
     }
 
-    fn inline_equals(
-        self,
-        op: &str,
-        first: &Simple<'_>,
-        second: &Simple<'_>,
-        out: &mut Mapper<impl fmt::Write>,
-    ) -> fmt::Result {
+    /// Render `simple` into a single char if it is one, already styled by `out`
+    fn single_char(self, simple: &Simple<'_>, out: &Mapper<impl fmt::Write>) -> Option<char> {
+        let mut single = SingleChar::default();
+        self.inline_simple_stripped(simple, &mut out.onto(&mut single))
+            .ok()?;
+        single.0
+    }
+
+    /// The relation symbol for `=` with `over` stacked above it
+    fn equals_char(self, over: &Simple<'_>, out: &Mapper<impl fmt::Write>) -> Option<char> {
         let mut buf = SmallBuf::default();
-        if self
-            .inline_simple_stripped(first, &mut out.onto(&mut buf))
-            .is_ok()
-            && let Some(s) = buf.as_str()
-            && let Some(c) = match s {
-                "∘" => Some('\u{2257}'),
-                "⋆" => Some('\u{225b}'),
-                "△" => Some('\u{225c}'),
-                "def" => Some('\u{225d}'),
-                "m" => Some('\u{225e}'),
-                "?" => Some('\u{225f}'),
-                _ => None,
-            }
-        {
-            out.write_char(c)
-        } else {
-            self.inline_bgeneric(op, first, second, out)
+        self.inline_simple_stripped(over, &mut out.onto(&mut buf))
+            .ok()?;
+        match buf.as_str()? {
+            "∘" => Some('\u{2257}'),
+            "⋆" => Some('\u{225b}'),
+            "△" => Some('\u{225c}'),
+            "def" => Some('\u{225d}'),
+            "m" => Some('\u{225e}'),
+            "?" => Some('\u{225f}'),
+            _ => None,
         }
     }
 
@@ -336,19 +343,24 @@ impl Conf {
 
     fn inline_overset(
         self,
-        op: &str,
         over: &Simple<'_>,
         base: &Simple<'_>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
         if let iden!(letter) = self.unwrap_single(over)
             && let Some(mark) = combining_letter(letter)
+            && let Some(base_char) = self.single_char(base, out)
         {
-            self.inline_cover(op, over, base, mark, out)
-        } else if matches!(base, symb!("=")) {
-            self.inline_equals(op, over, base, out)
+            // base_char is already styled; write to inner so the font isn't re-applied
+            out.inner.write_char(base_char)?;
+            out.write_char(mark)
+        } else if matches!(self.unwrap_single(base), symb!("="))
+            && let Some(relation) = self.equals_char(over, out)
+        {
+            out.write_char(relation)
         } else {
-            self.inline_bgeneric(op, over, base, out)
+            self.inline_simple_stripped(base, out)?;
+            self.inline_sub_or_sup(over, out.conf.with_sup(), '^', out)
         }
     }
 
@@ -358,20 +370,19 @@ impl Conf {
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
         match (simple.op, simple.first(), simple.second()) {
-            ("root", index, arg) => {
-                // the index is never shown as-is, so its brackets are always syntax
-                if let Some(root) = root_char(unwrap_parens(index)) {
-                    self.inline_root(root, arg, out)
-                } else {
-                    self.inline_bgeneric(simple.op, index, arg, out)
-                }
-            }
+            ("root", index, radicand) => self.inline_nroot(index, radicand, out),
             ("frac", numer, denom) => self.inline_simplefrac(numer, denom, out).or_else(|_| {
                 self.inline_simple(numer, out)?;
                 out.write_char('/')?;
                 self.inline_simple(denom, out)
             }),
-            ("stackrel" | "overset", over, base) => self.inline_overset(simple.op, over, base, out),
+            ("stackrel" | "overset", over, base) => self.inline_overset(over, base, out),
+            ("underset", under, base) => {
+                self.inline_simple_stripped(base, out)?;
+                self.inline_sub_or_sup(under, out.conf.with_sub(), '_', out)
+            }
+            // styling and annotations that plain text can't carry
+            ("color" | "id" | "class", _, arg) => self.inline_simple_stripped(arg, out),
             (op, first, second) => self.inline_bgeneric(op, first, second, out),
         }
     }
@@ -406,32 +417,30 @@ impl Conf {
         self.inline_simple_stripped(arg, &mut out.with_modifier(chr))
     }
 
+    /// A `line` goes on every char of a longer argument; a mark can only sit on one, so
+    /// anything longer falls back to `op arg`
     fn inline_char_modi(
         self,
         op: &str,
-        chr: char,
+        mark: char,
+        line: Option<char>,
         arg: &Simple<'_>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
         // Try precomposition for single-char arguments (check AST, not rendered output)
         if let &Simple::Ident(text) | &Simple::Number(text) = self.unwrap_single(arg)
             && let Some(base) = only(text.chars())
-            && let Some(precomposed) = compose(base, chr)
+            && let Some(precomposed) = compose(base, mark)
         {
             out.write_char(precomposed)
+        } else if let Some(res) = self.single_char(arg, out) {
+            // res is already styled; write to inner so the font isn't re-applied
+            out.inner.write_char(res)?;
+            out.write_char(mark)
+        } else if let Some(line) = line {
+            self.inline_modi(line, arg, out)
         } else {
-            let mut single = SingleChar::default();
-            if self
-                .inline_simple_stripped(arg, &mut out.onto(&mut single))
-                .is_ok()
-                && let Some(res) = single.0
-            {
-                // res is already styled; write to inner so the font isn't re-applied
-                out.inner.write_char(res)?;
-                out.write_char(chr)
-            } else {
-                self.inline_ugeneric(op, arg, out)
-            }
+            self.inline_ugeneric(op, arg, out)
         }
     }
 
@@ -446,18 +455,13 @@ impl Conf {
         self.inline_simple(arg, out)
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(crate) fn inline_simpleunary(
         self,
         simple: &SimpleUnary<'_>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
         match (simple.op, simple.arg()) {
-            // sqrt
-            ("sqrt", arg) => {
-                out.write_char('√')?;
-                self.inline_simple(arg, out)
-            }
+            ("sqrt", arg) => self.inline_root("√", arg, out),
             // fonts
             ("bb" | "mathbf", arg) => self.inline_font(bold_map, arg, out),
             ("bbb" | "mathbb", arg) => self.inline_font(double_map, arg, out),
@@ -471,19 +475,25 @@ impl Conf {
             ("ceil", arg) => self.inline_sfunc("⌈", arg, "⌉", out),
             ("floor", arg) => self.inline_sfunc("⌊", arg, "⌋", out),
             ("norm", arg) => self.inline_sfunc("||", arg, "||", out),
-            ("text" | "mbox", arg) => self.inline_sfunc("", arg, "", out),
+            // braces have no plain-text form; their labels arrive as scripts
+            ("text" | "mbox" | "ubrace" | "underbrace" | "obrace" | "overbrace", arg) => {
+                self.inline_simple_stripped(arg, out)
+            }
             // modifiers
             ("overline", arg) => self.inline_modi('\u{0305}', arg, out),
             ("underline" | "ul", arg) => self.inline_modi('\u{0332}', arg, out),
             ("cancel", arg) => self.inline_modi('\u{0336}', arg, out),
             // single character modifiers
-            (o @ "hat", arg) => self.inline_char_modi(o, '\u{0302}', arg, out),
-            (o @ "tilde", arg) => self.inline_char_modi(o, '\u{0303}', arg, out),
-            (o @ "bar", arg) => self.inline_char_modi(o, '\u{0304}', arg, out),
-            (o @ "dot", arg) => self.inline_char_modi(o, '\u{0307}', arg, out),
-            (o @ "ddot", arg) => self.inline_char_modi(o, '\u{0308}', arg, out),
-            (o @ ("overarc" | "overparen"), arg) => self.inline_char_modi(o, '\u{0311}', arg, out),
-            (o @ "vec", arg) => self.inline_char_modi(o, '\u{20D7}', arg, out),
+            (op @ "hat", arg) => self.inline_char_modi(op, '\u{0302}', None, arg, out),
+            (op @ "tilde", arg) => self.inline_char_modi(op, '\u{0303}', None, arg, out),
+            // a bar over several chars is an overline
+            (op @ "bar", arg) => self.inline_char_modi(op, '\u{0304}', Some('\u{0305}'), arg, out),
+            (op @ "dot", arg) => self.inline_char_modi(op, '\u{0307}', None, arg, out),
+            (op @ "ddot", arg) => self.inline_char_modi(op, '\u{0308}', None, arg, out),
+            (op @ ("overarc" | "overparen"), arg) => {
+                self.inline_char_modi(op, '\u{0311}', None, arg, out)
+            }
+            (op @ "vec", arg) => self.inline_char_modi(op, '\u{20D7}', None, arg, out),
             // generic
             (op, arg) => self.inline_ugeneric(op, arg, out),
         }
@@ -547,42 +557,39 @@ impl Conf {
         }
     }
 
+    /// Write `script` through `conf` when every char maps, otherwise after a literal `marker`
+    fn inline_sub_or_sup(
+        self,
+        script: &Simple<'_>,
+        conf: Option<MapperConf>,
+        marker: char,
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
+        if let Some(sconf) = conf
+            && self
+                .inline_simple_stripped(script, &mut sconf.wrap(&mut Sink))
+                .is_ok()
+        {
+            self.inline_simple_stripped(script, &mut sconf.wrap(out.inner))
+        } else {
+            out.write_char(marker)?;
+            self.inline_simple(script, out)
+        }
+    }
+
     fn inline_script(self, script: &Script<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
-        let mut sink = Sink;
         match script {
             Script::None => Ok(()),
-            Script::Sub(sub) => {
-                if let Some(sconf) = out.conf.with_sub()
-                    && self
-                        .inline_simple_stripped(sub, &mut sconf.wrap(&mut sink))
-                        .is_ok()
-                {
-                    self.inline_simple_stripped(sub, &mut sconf.wrap(out.inner))
-                } else {
-                    out.write_char('_')?;
-                    self.inline_simple(sub, out)
-                }
-            }
-            Script::Super(sup) => {
-                if let Some(sconf) = out.conf.with_sup()
-                    && self
-                        .inline_simple_stripped(sup, &mut sconf.wrap(&mut sink))
-                        .is_ok()
-                {
-                    self.inline_simple_stripped(sup, &mut sconf.wrap(out.inner))
-                } else {
-                    out.write_char('^')?;
-                    self.inline_simple(sup, out)
-                }
-            }
+            Script::Sub(sub) => self.inline_sub_or_sup(sub, out.conf.with_sub(), '_', out),
+            Script::Super(sup) => self.inline_sub_or_sup(sup, out.conf.with_sup(), '^', out),
             Script::Subsuper(sub, sup) => {
                 if let Some(sub_conf) = out.conf.with_sub()
                     && self
-                        .inline_simple_stripped(sub, &mut sub_conf.wrap(&mut sink))
+                        .inline_simple_stripped(sub, &mut sub_conf.wrap(&mut Sink))
                         .is_ok()
                     && let Some(sup_conf) = out.conf.with_sup()
                     && self
-                        .inline_simple_stripped(sup, &mut sup_conf.wrap(&mut sink))
+                        .inline_simple_stripped(sup, &mut sup_conf.wrap(&mut Sink))
                         .is_ok()
                 {
                     self.inline_simple_stripped(sub, &mut sub_conf.wrap(out.inner))?;
@@ -936,8 +943,9 @@ mod tests {
         let res = super::super::parse_unicode("overset (e) (y)").to_string();
         assert_eq!(res, "y\u{0364}");
 
+        // a multi-char base can't take a combining letter, so it is raised instead
         let res = super::super::parse_unicode("oversetasinx").to_string();
-        assert_eq!(res, "overset a sin x");
+        assert_eq!(res, "sin xᵃ");
     }
 
     #[test]
@@ -1274,13 +1282,6 @@ mod tests {
     }
 
     #[test]
-    fn generic_unary_falls_through() {
-        // an unrecognized unary op is emitted verbatim followed by its argument.
-        let res = super::super::parse_unicode("obrace x").to_string();
-        assert_eq!(res, "obrace x");
-    }
-
-    #[test]
     fn script_frac_grouped_numerator() {
         // (x+1)/2 with script fracs: grouped numerator superscripted over subscript
         let res = super::super::parse_unicode("(x+1)/2").to_string();
@@ -1310,18 +1311,50 @@ mod tests {
     #[test]
     fn roots() {
         let render = |inp: &str| super::super::parse_unicode(inp).to_string();
-        assert_eq!(render("root(2)(x)"), "√(x)");
-        assert_eq!(render("root(3)(x)"), "∛(x)");
-        assert_eq!(render("root(4)(x)"), "∜(x)");
-        // any other index falls through to the generic binary rendering
-        assert_eq!(render("root(5)(x)"), "root (5) (x)");
+        assert_eq!(render("root(2)(x)"), "√x");
+        assert_eq!(render("root(3)(x)"), "∛x");
+        assert_eq!(render("root(4)(x)"), "∜x");
+        // other indices are raised in front of the radical
+        assert_eq!(render("root(5)(x)"), "⁵√x");
+        assert_eq!(render("root(n)(x+1)"), "ⁿ√(x+1)");
+        // an index without a superscript form falls back to the command
+        assert_eq!(render("root(Q)(x)"), "root (Q) (x)");
+        // parentheses around a lone radicand are dropped
+        assert_eq!(render("sqrt(x)"), "√x");
+        assert_eq!(render("sqrt(2x)"), "√(2x)");
     }
 
     #[test]
-    fn generic_binary_falls_through() {
-        // an unrecognized binary op emits `op first second`, space-separated
-        let res = super::super::parse_unicode("color(red)(x)").to_string();
-        assert_eq!(res, "color (red) (x)");
+    fn annotation_commands() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        // only the annotated expression is shown
+        assert_eq!(render("color(red)(x)"), "x");
+        assert_eq!(render("id(a)(x)"), "x");
+        assert_eq!(render("class(b)(x+1)"), "x+1");
+        assert_eq!(render("ubrace(x+y)"), "x+y");
+        assert_eq!(render("underbrace(x+y)"), "x+y");
+        assert_eq!(render("obrace(x+y)"), "x+y");
+        assert_eq!(render("overbrace(x+y)"), "x+y");
+    }
+
+    #[test]
+    fn over_and_under() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("underset(x)(lim)"), "limₓ");
+        assert_eq!(render("underset(x->0)(lim) f(x)"), "lim_(x→0) f(x)");
+        assert_eq!(render("stackrel(def)(=)"), "≝");
+        assert_eq!(render("overset(?)(=)"), "≟");
+        assert_eq!(render("overset(abc)(X)"), "Xᵃᵇᶜ");
+        assert_eq!(render("stackrel(->)(=)"), "=^(→)");
+    }
+
+    #[test]
+    fn primes_and_script_commas() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("x^'"), "x′");
+        assert_eq!(render("f''(x)"), "f′′(x)");
+        assert_eq!(render("x_(i,j)"), "xᵢ,ⱼ");
+        assert_eq!(render("x^(i,j)"), "xⁱ,ʲ");
     }
 
     #[test]
@@ -1353,9 +1386,18 @@ mod tests {
         // single symbol in a group: no precomposed form, modifier combines anyway
         assert_eq!(render("hat(+)"), "+\u{0302}");
         assert_eq!(render("dot(+)"), "+\u{0307}");
-        // multi-element group: not a single char, falls back to generic op rendering
+        // one accent can't span several chars, so the command stays literal
         assert_eq!(render("hat(x y)"), "hat (xy)");
         assert_eq!(render("vec(AB)"), "vec (AB)");
+        assert_eq!(render("dot(ab)"), "dot (ab)");
+        assert_eq!(render("ddot(ab)"), "ddot (ab)");
+        assert_eq!(render("tilde(ab)"), "tilde (ab)");
+        assert_eq!(render("hat|x|"), "hat |x|");
+        // lines join up, so they go on every char but brackets
+        assert_eq!(render("ul(ab)"), "a\u{0332}b\u{0332}");
+        assert_eq!(render("bar(xy)"), "x\u{0305}y\u{0305}");
+        assert_eq!(render("bar|xy|"), "|x\u{0305}y\u{0305}|");
+        assert_eq!(render("overline(a+b)"), "a\u{0305}+\u{0305}b\u{0305}");
     }
 
     #[test]
@@ -1424,7 +1466,7 @@ mod tests {
         // a function touches a bracketed argument and is spaced from a bare one
         assert_eq!(render("sin(x)"), "sin(x)");
         assert_eq!(render("f(x)"), "f(x)");
-        assert_eq!(render("f'(x)"), "f'(x)");
+        assert_eq!(render("f'(x)"), "f′(x)");
         assert_eq!(render("sin^2(x)"), "sin²(x)");
         assert_eq!(render("sin x"), "sin x");
         assert_eq!(render("log_2 x"), "log₂ x");
@@ -1472,6 +1514,7 @@ mod tests {
         assert_eq!(render("7/[8]"), "⅞");
         assert_eq!(render("{a} / (s)"), "℁");
         assert_eq!(render("dot{x}"), "ẋ");
+        assert_eq!(render("root {4} x"), "∜x");
     }
 
     #[test]

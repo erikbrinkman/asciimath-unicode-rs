@@ -288,20 +288,19 @@ fn simple_edges(simple: &Simple<'_>, script: &Script<'_>) -> (Edge, Edge) {
 fn scriptfunc_edges(func: &ScriptFunc<'_>) -> (Edge, Edge) {
     match func {
         ScriptFunc::Simple(SimpleScript { simple, script }) => simple_edges(simple, script),
-        ScriptFunc::Func(func) => {
-            let right = if matches!(
+        // a bare name like the `f` in `def` is just a letter
+        ScriptFunc::Func(func)
+            if matches!(
                 func.arg(),
                 ScriptFunc::Simple(SimpleScript {
                     simple: Simple::Missing,
                     ..
                 })
-            ) {
-                Edge::Applied
-            } else {
-                Edge::Operand
-            };
-            (Edge::Word, right)
+            ) =>
+        {
+            (Edge::Operand, Edge::Applied)
         }
+        ScriptFunc::Func(_) => (Edge::Word, Edge::Operand),
     }
 }
 
