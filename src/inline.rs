@@ -233,6 +233,15 @@ fn combining_letter(letter: &str) -> Option<char> {
     }
 }
 
+/// How many vertical lines the matrix draws at a column boundary
+pub(crate) fn column_rules(matrix: &Matrix<'_>, boundary: usize) -> usize {
+    matrix
+        .column_lines()
+        .iter()
+        .filter(|&&line| line == boundary)
+        .count()
+}
+
 fn root_char(index: &Simple<'_>) -> Option<char> {
     match index {
         num!("2") => Some('√'),
@@ -509,10 +518,17 @@ impl Conf {
             }
             out.write_str(left)?;
             for (j, expr) in row.iter().enumerate() {
-                if j > 0 {
+                let rules = column_rules(matrix, j);
+                if j > 0 && rules == 0 {
                     out.write_char(',')?;
                 }
+                for _ in 0..rules {
+                    out.write_char('|')?;
+                }
                 self.inline_expression(expr, out)?;
+            }
+            for _ in 0..column_rules(matrix, row.len()) {
+                out.write_char('|')?;
             }
             out.write_str(right)?;
         }
@@ -534,7 +550,7 @@ impl Conf {
             Simple::Missing => Ok(()),
             &Simple::Number(num) => out.write_str(num),
             &Simple::Text(text) => out.write_str(text),
-            &Simple::Ident(ident) => out.write_str(ident),
+            &Simple::Ident(ident) | &Simple::Operator(ident) => out.write_str(ident),
             &Simple::Symbol(symbol) => out.write_str(symbol_str(symbol, self.skin_tone)),
             Simple::Func(func) => self.inline_simplefunc(func, out),
             Simple::Unary(unary) => self.inline_simpleunary(unary, out),
@@ -1016,6 +1032,14 @@ mod tests {
 
         let res = opts.parse("[ [x, y], [a, b] ]").to_string();
         assert_eq!(res, "[[x,y],[a,b]]");
+    }
+
+    #[test]
+    fn matrix_column_lines() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("[(a,|,b),(c,|,d)]"), "[[a|b],[c|d]]");
+        assert_eq!(render("[(|,a,b,|),(|,c,d,|)]"), "[[|a,b|],[|c,d|]]");
+        assert_eq!(render("[(a,|,|,b),(c,|,|,d)]"), "[[a||b],[c||d]]");
     }
 
     #[test]
