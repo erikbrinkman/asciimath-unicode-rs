@@ -454,7 +454,7 @@ impl Conf {
     fn block_simplefunc(self, func: &SimpleFunc<'_>) -> Block {
         let name = Block::text(func.func);
         let arg = self.block_simple(func.arg());
-        if hugs_argument(func.arg()) {
+        if hugs_argument(func.arg()) || arg.width == 0 {
             name.beside(arg)
         } else {
             name.beside(Block::space(1)).beside(arg)
@@ -604,7 +604,7 @@ impl Conf {
         let name = Block::text(func.func);
         let name_with_script = self.block_apply_script(name, &func.script);
         let arg = self.block_scriptfunc(func.arg());
-        if func_hugs_argument(func) {
+        if func_hugs_argument(func) || arg.width == 0 {
             name_with_script.beside(arg)
         } else {
             name_with_script.beside(Block::space(1)).beside(arg)
@@ -1073,5 +1073,10 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(conf.parse("x/n").to_string(), "x\n─\nn");
+    }
+
+    #[test]
+    fn nothing_to_render_leaves_no_space() {
+        assert_eq!(render_block("dx g obrace() dy"), "dx g dy");
     }
 }
