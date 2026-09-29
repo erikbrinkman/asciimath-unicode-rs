@@ -638,9 +638,7 @@ impl Conf {
 
     /// If `strip_brackets` is on and simple is a group, render the inner expression.
     fn block_simple_or_expr_stripped(self, simple: &Simple<'_>) -> Block {
-        if self.strip_brackets
-            && let Simple::Group(Group { expr, .. }) = simple
-        {
+        if let Some(expr) = self.stripped(simple) {
             self.block_expression(expr)
         } else {
             self.block_simple(simple)
