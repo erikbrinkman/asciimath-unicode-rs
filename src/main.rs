@@ -1,4 +1,4 @@
-use asciimath_unicode::{Conf, Layout, SkinTone};
+use asciimath_unicode::{Conf, Layout, Placeholders, SkinTone};
 use clap::{Parser, ValueEnum};
 use std::io;
 use std::io::{Read, Write};
@@ -66,6 +66,22 @@ struct Args {
     /// How to lay out the math
     #[arg(long, value_enum, default_value_t = LayoutArg::InlineScript)]
     layout: LayoutArg,
+
+    /// Show a mark where a part of the math isn't there yet
+    #[arg(long)]
+    placeholders: bool,
+
+    /// What stands in for a missing argument, fraction part, bracket pair or cell
+    #[arg(long, value_name = "CHAR", requires = "placeholders", default_value_t = Placeholders::default().char)]
+    placeholder: char,
+
+    /// What stands in for a missing subscript
+    #[arg(long, value_name = "CHAR", requires = "placeholders", default_value_t = Placeholders::default().sub)]
+    placeholder_sub: char,
+
+    /// What stands in for a missing superscript
+    #[arg(long, value_name = "CHAR", requires = "placeholders", default_value_t = Placeholders::default().sup)]
+    placeholder_sup: char,
 }
 
 impl From<Args> for Conf {
@@ -75,6 +91,12 @@ impl From<Args> for Conf {
             .with_vulgar_fracs(!inp.no_vulgar_fracs)
             .with_skin_tone(inp.skin_tone.into())
             .with_layout(inp.layout.into())
+            .with_placeholders(inp.placeholders.then(|| {
+                Placeholders::default()
+                    .with_char(inp.placeholder)
+                    .with_sub(inp.placeholder_sub)
+                    .with_sup(inp.placeholder_sup)
+            }))
     }
 }
 

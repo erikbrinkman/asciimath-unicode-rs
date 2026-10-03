@@ -59,9 +59,17 @@ assert_eq!(res, "x\n─\ny");
 `Conf` starts from `default()`; set fields directly or with the matching
 `with_*` method.
 
-| Field            |       Type |        Default | Description                                                           |
-|------------------|------------|----------------|-----------------------------------------------------------------------|
-| `strip_brackets` |     `bool` |         `true` | Drop ( ), [ ] and { } around fractions, scripts and command arguments |
-| `vulgar_fracs`   |     `bool` |         `true` | Render fractions as vulgar fractions (e.g. ½)                         |
-| `skin_tone`      | `SkinTone` |      `Default` | Default skin tone for emojis                                          |
-| `layout`         |   `Layout` | `InlineScript` | How to lay out the math: `InlineScript`, `InlinePlain`, or `Block`    |
+| Field            | Type                   | Default        | Description                                                           |
+|------------------|------------------------|----------------|-----------------------------------------------------------------------|
+| `strip_brackets` |                 `bool` |         `true` | Drop ( ), [ ] and { } around fractions, scripts and command arguments |
+| `vulgar_fracs`   |                 `bool` |         `true` | Render fractions as vulgar fractions (e.g. ½)                         |
+| `skin_tone`      |             `SkinTone` |      `Default` | Default skin tone for emojis                                          |
+| `layout`         |               `Layout` | `InlineScript` | How to lay out the math: `InlineScript`, `InlinePlain`, or `Block`    |
+| `placeholders`   | `Option<Placeholders>` |         `None` | What stands in for the parts that aren't there yet                    |
+
+`Placeholders` holds the marks themselves: `char` for an argument, fraction part, bracket pair or
+matrix cell with nothing in it, `sub` for a subscript and `sup` for a superscript, defaulting to
+`□`, `▫` and `⸋`.
+
+Whether the mark replaces a bracket pair with nothing in it or sits between the brackets follows
+`strip_brackets`: `abs()` renders `|□|` by default and `|(□)|` with the brackets kept.

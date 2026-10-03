@@ -136,6 +136,8 @@ pub struct Conf {
     pub skin_tone: SkinTone,
     /// How to lay out the math
     pub layout: Layout,
+    /// What stands in for the parts that aren't there yet, or `None` to show nothing
+    pub placeholders: Option<Placeholders>,
 }
 
 /// How to lay out the math
@@ -150,6 +152,51 @@ pub enum Layout {
     Block,
 }
 
+/// What stands in for the parts of half-typed math that aren't there yet
+///
+/// Start from [`Placeholders::default()`][Default::default] and change what you need, by field or
+/// with the `with_*` methods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub struct Placeholders {
+    /// Stands in for a missing argument, fraction part, bracket pair or cell
+    pub char: char,
+    /// Stands in for a missing subscript
+    pub sub: char,
+    /// Stands in for a missing superscript
+    pub sup: char,
+}
+
+impl Default for Placeholders {
+    fn default() -> Self {
+        Placeholders {
+            char: '□',
+            sub: '▫',
+            sup: '⸋',
+        }
+    }
+}
+
+impl Placeholders {
+    /// Set what stands in for a missing argument, fraction part, bracket pair or cell
+    #[must_use]
+    pub fn with_char(self, chr: char) -> Self {
+        Placeholders { char: chr, ..self }
+    }
+
+    /// Set what stands in for a missing subscript
+    #[must_use]
+    pub fn with_sub(self, sub: char) -> Self {
+        Placeholders { sub, ..self }
+    }
+
+    /// Set what stands in for a missing superscript
+    #[must_use]
+    pub fn with_sup(self, sup: char) -> Self {
+        Placeholders { sup, ..self }
+    }
+}
+
 impl Default for Conf {
     fn default() -> Self {
         Conf {
@@ -157,6 +204,7 @@ impl Default for Conf {
             vulgar_fracs: true,
             skin_tone: SkinTone::Default,
             layout: Layout::InlineScript,
+            placeholders: None,
         }
     }
 }
@@ -190,6 +238,43 @@ impl Conf {
     #[must_use]
     pub fn with_layout(self, layout: Layout) -> Self {
         Conf { layout, ..self }
+    }
+
+    /// Set what stands in for the parts that aren't there yet, or `None` to show nothing
+    ///
+    /// This is for showing math while it is still being typed, so that `x^` or `sqrt` doesn't
+    /// look the same as `x` or nothing. Brackets or a matrix cell with nothing in them count as
+    /// a part being typed too, while a function name like `sin` or `f` reads fine alone and gets
+    /// no placeholder.
+    ///
+    /// Whether the mark replaces a bracket pair with nothing in it or sits between the brackets
+    /// follows [`strip_brackets`][Conf::strip_brackets]: `abs()` gives `|□|` by default and
+    /// `|(□)|` with the brackets kept.
+    ///
+    /// A script that can't be raised or lowered is written after a literal `^` or `_`, and a
+    /// script that isn't there yet then takes `char` rather than `sup` or `sub`: `x_y^` gives
+    /// `x_y^□` because `y` has no subscript form, while `x_x^` gives `xₓ⸋`.
+    ///
+    /// ```
+    /// use asciimath_unicode::{Conf, Placeholders};
+    /// let conf = Conf::default().with_placeholders(Some(Placeholders::default()));
+    /// assert_eq!(conf.parse("sqrt").to_string(), "√□");
+    /// assert_eq!(conf.parse("x^").to_string(), "x⸋");
+    /// assert_eq!(conf.parse("abs()").to_string(), "|□|");
+    /// assert_eq!(conf.with_strip_brackets(false).parse("abs()").to_string(), "|(□)|");
+    /// assert_eq!(conf.parse("x_y^").to_string(), "x_y^□");
+    ///
+    /// let marks = Placeholders::default().with_char('?').with_sup('!');
+    /// let conf = conf.with_placeholders(Some(marks));
+    /// assert_eq!(conf.parse("sqrt").to_string(), "√?");
+    /// assert_eq!(conf.parse("x^").to_string(), "x!");
+    /// ```
+    #[must_use]
+    pub fn with_placeholders(self, placeholders: Option<Placeholders>) -> Self {
+        Conf {
+            placeholders,
+            ..self
+        }
     }
 
     /// Whether one-line fractions may be written as super- and subscripts
