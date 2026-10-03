@@ -55,6 +55,22 @@ pub fn paren_contents<'s, 'a>(simple: &'s Simple<'a>) -> Option<&'s Expression<'
     }
 }
 
+/// Whether a group was opened with nothing in it yet and its brackets only group
+pub fn is_empty_grouping(simple: &Simple<'_>) -> bool {
+    match simple {
+        Simple::Group(Group { left_bracket, .. }) if !left_bracket.is_empty() => {
+            paren_contents(simple).is_some_and(|expr| expr.is_empty())
+        }
+        _ => false,
+    }
+}
+
+/// Whether a function name was written with no argument after it; a name like `f` or `sin` reads
+/// fine alone, so it gets no placeholder
+pub fn name_without_argument(arg: &Simple<'_>) -> bool {
+    matches!(arg, Simple::Missing)
+}
+
 /// The lone unscripted simple an expression consists of, if any
 pub fn single_simple<'s, 'a>(expr: &'s Expression<'a>) -> Option<&'s Simple<'a>> {
     if let [

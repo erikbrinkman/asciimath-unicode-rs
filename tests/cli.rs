@@ -23,6 +23,18 @@ fn run(args: &[&str], input: &str) -> String {
     String::from_utf8(output.stdout).expect("stdout was not utf-8")
 }
 
+/// Run the binary with `args` and no input, returning its exit code.
+fn exit_code(args: &[&str]) -> Option<i32> {
+    let output = Command::new(env!("CARGO_BIN_EXE_asciimath-unicode"))
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("failed to run binary");
+    output.status.code()
+}
+
 #[test]
 fn converts_with_defaults() {
     assert_eq!(run(&[], "1/2"), "½\n");
@@ -52,6 +64,41 @@ fn block_no_vulgar_fracs_stacks() {
 #[test]
 fn no_strip_brackets() {
     assert_eq!(run(&["--no-strip-brackets"], "sqrt(x)"), "√(x)\n");
+}
+
+#[test]
+fn placeholders() {
+    assert_eq!(run(&[], "x^"), "x\n");
+    assert_eq!(run(&["--placeholders"], "x^"), "x⸋\n");
+    assert_eq!(run(&["--placeholders"], "1/"), "1/□\n");
+    assert_eq!(
+        run(&["--placeholders", "--placeholder", "?"], "sqrt"),
+        "√?\n"
+    );
+    assert_eq!(
+        run(&["--placeholders", "--placeholder-sub", "."], "x_"),
+        "x.\n"
+    );
+    assert_eq!(
+        run(&["--placeholders", "--placeholder-sup", "!"], "x^"),
+        "x!\n"
+    );
+    assert_eq!(run(&["--placeholders"], ")"), ")\n");
+    assert_eq!(
+        run(&["--placeholders", "--no-strip-brackets"], "abs()"),
+        "|(□)|\n"
+    );
+    assert_eq!(
+        run(&["--placeholders", "--layout", "block"], "(: :)"),
+        "⟨□⟩\n"
+    );
+}
+
+#[test]
+fn placeholder_marks_need_placeholders() {
+    assert_eq!(exit_code(&["--placeholder", "?"]), Some(2));
+    assert_eq!(exit_code(&["--placeholder-sub", "."]), Some(2));
+    assert_eq!(exit_code(&["--placeholder-sup", "!"]), Some(2));
 }
 
 #[test]
