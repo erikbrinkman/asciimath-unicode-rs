@@ -10,8 +10,8 @@ use unicode_normalization::char::compose;
 
 use super::Conf;
 use super::ast::{
-    extract_vulgar_frac, func_hugs_argument, hugs_argument, needs_space, paren_contents,
-    unwrap_parens,
+    extract_vulgar_frac, func_hugs_argument, hugs_argument, is_empty_grouping,
+    name_without_argument, needs_space, paren_contents, unwrap_parens,
 };
 use super::tokens::{
     bold_map, cal_map, double_map, frak_map, italic_map, left_bracket_str, mono_map,
@@ -311,10 +311,53 @@ impl<'a> Operand<'a> for ScriptFunc<'a> {
 impl Conf {
     pub(crate) fn stripped<'s, 'a>(self, simple: &'s Simple<'a>) -> Option<&'s Expression<'a>> {
         if self.strip_brackets {
-            paren_contents(simple)
+            // a placeholder stands in for an empty group, brackets and all
+            paren_contents(simple).filter(|expr| self.placeholders.is_none() || !expr.is_empty())
         } else {
             None
         }
+    }
+
+    /// Whether a part of the math isn't there yet; a group with nothing in it is one being
+    /// typed, as long as its brackets were going to be dropped
+    fn is_missing(self, simple: &Simple<'_>) -> bool {
+        matches!(simple, Simple::Missing) || (self.strip_brackets && is_empty_grouping(simple))
+    }
+
+    /// What stands in for `simple` when it is a part that isn't there yet
+    pub(crate) fn placeholder(self, simple: &Simple<'_>) -> Option<char> {
+        match self.placeholders {
+            Some(marks) if self.is_missing(simple) => Some(marks.char),
+            _ => None,
+        }
+    }
+
+    /// What stands in for `expr` when it has nothing in it, so a part is being typed there
+    pub(crate) fn empty_placeholder(self, expr: &Expression<'_>) -> Option<char> {
+        match self.placeholders {
+            Some(marks) if expr.is_empty() => Some(marks.char),
+            _ => None,
+        }
+    }
+
+    /// What stands in for `group`'s contents when it was opened with nothing in it and its
+    /// brackets stay
+    pub(crate) fn group_placeholder(self, group: &Group<'_>) -> Option<char> {
+        if group.left_bracket.is_empty() {
+            None
+        } else {
+            self.empty_placeholder(&group.expr)
+        }
+    }
+
+    /// What stands in for a subscript that isn't there yet
+    pub(crate) fn sub_placeholder(self) -> Option<char> {
+        self.placeholders.map(|marks| marks.sub)
+    }
+
+    /// What stands in for a superscript that isn't there yet
+    pub(crate) fn sup_placeholder(self) -> Option<char> {
+        self.placeholders.map(|marks| marks.sup)
     }
 
     fn unwrap_single<'s, 'a>(self, simple: &'s Simple<'a>) -> &'s Simple<'a> {
@@ -331,7 +374,11 @@ impl Conf {
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
         out.write_str(simple.func)?;
-        self.inline_applied_arg(simple.arg(), hugs_argument(simple.arg()), out)
+        if name_without_argument(simple.arg()) {
+            Ok(())
+        } else {
+            self.inline_applied_arg(simple.arg(), hugs_argument(simple.arg()), out)
+        }
     }
 
     fn inline_root(
@@ -435,7 +482,7 @@ impl Conf {
             out.write_char(relation)
         } else {
             self.inline_simple_stripped(base, out)?;
-            self.inline_sub_or_sup(over, out.conf.with_sup(), '^', out)
+            self.inline_sub_or_sup(over, out.conf.with_sup(), '^', self.sup_placeholder(), out)
         }
     }
 
@@ -457,7 +504,7 @@ impl Conf {
             ("stackrel" | "overset", over, base) => self.inline_overset(over, base, out),
             ("underset", under, base) => {
                 self.inline_simple_stripped(base, out)?;
-                self.inline_sub_or_sup(under, out.conf.with_sub(), '_', out)
+                self.inline_sub_or_sup(under, out.conf.with_sub(), '_', self.sub_placeholder(), out)
             }
             // styling and annotations that plain text can't carry
             ("color" | "id" | "class", _, arg) => self.inline_simple_stripped(arg, out),
@@ -604,7 +651,11 @@ impl Conf {
                 for _ in 0..rules {
                     out.write_char('|')?;
                 }
-                self.inline_expression(expr, out)?;
+                if let Some(chr) = self.empty_placeholder(expr) {
+                    out.write_char(chr)?;
+                } else {
+                    self.inline_expression(expr, out)?;
+                }
             }
             for _ in 0..column_rules(matrix, row.len()) {
                 out.write_char('|')?;
@@ -616,7 +667,11 @@ impl Conf {
 
     fn inline_group(self, group: &Group<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
         out.write_str(left_bracket_str(group.left_bracket))?;
-        self.inline_expression(&group.expr, out)?;
+        if let Some(chr) = self.group_placeholder(group) {
+            out.write_char(chr)?;
+        } else {
+            self.inline_expression(&group.expr, out)?;
+        }
         out.write_str(right_bracket_str(group.right_bracket))
     }
 
@@ -625,17 +680,21 @@ impl Conf {
         simple: &Simple<'_>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
-        match simple {
-            Simple::Missing => Ok(()),
-            &Simple::Number(num) => out.write_str(num),
-            &Simple::Text(text) => out.write_str(text),
-            &Simple::Ident(ident) | &Simple::Operator(ident) => out.write_str(ident),
-            &Simple::Symbol(symbol) => out.write_str(symbol_str(symbol, self.skin_tone)),
-            Simple::Func(func) => self.inline_simplefunc(func, out),
-            Simple::Unary(unary) => self.inline_simpleunary(unary, out),
-            Simple::Binary(binary) => self.inline_simplebinary(binary, out),
-            Simple::Group(group) => self.inline_group(group, out),
-            Simple::Matrix(matrix) => self.inline_matrix(matrix, out),
+        if let Some(chr) = self.placeholder(simple) {
+            out.write_char(chr)
+        } else {
+            match simple {
+                Simple::Missing => Ok(()),
+                &Simple::Number(num) => out.write_str(num),
+                &Simple::Text(text) => out.write_str(text),
+                &Simple::Ident(ident) | &Simple::Operator(ident) => out.write_str(ident),
+                &Simple::Symbol(symbol) => out.write_str(symbol_str(symbol, self.skin_tone)),
+                Simple::Func(func) => self.inline_simplefunc(func, out),
+                Simple::Unary(unary) => self.inline_simpleunary(unary, out),
+                Simple::Binary(binary) => self.inline_simplebinary(binary, out),
+                Simple::Group(group) => self.inline_group(group, out),
+                Simple::Matrix(matrix) => self.inline_matrix(matrix, out),
+            }
         }
     }
 
@@ -665,17 +724,34 @@ impl Conf {
         Some(text)
     }
 
+    /// `script` with every char mapped through `conf`, if all map; where a script can go at all,
+    /// one that isn't there yet is its `placeholder` as is
+    pub(crate) fn mapped_script(
+        self,
+        script: &Simple<'_>,
+        conf: Option<MapperConf>,
+        placeholder: Option<char>,
+    ) -> Option<String> {
+        let conf = conf?;
+        if let Some(chr) = placeholder
+            && self.is_missing(script)
+        {
+            Some(chr.to_string())
+        } else {
+            self.mapped_operand(script, conf)
+        }
+    }
+
     /// Write `script` through `conf` when every char maps, otherwise after a literal `marker`
     fn inline_sub_or_sup(
         self,
         script: &Simple<'_>,
         conf: Option<MapperConf>,
         marker: char,
+        placeholder: Option<char>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
-        if let Some(sconf) = conf
-            && let Some(text) = self.mapped_operand(script, sconf)
-        {
+        if let Some(text) = self.mapped_script(script, conf, placeholder) {
             out.inner.write_str(&text)
         } else {
             out.write_char(marker)?;
@@ -686,13 +762,17 @@ impl Conf {
     fn inline_script(self, script: &Script<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
         match script {
             Script::None => Ok(()),
-            Script::Sub(sub) => self.inline_sub_or_sup(sub, out.conf.with_sub(), '_', out),
-            Script::Super(sup) => self.inline_sub_or_sup(sup, out.conf.with_sup(), '^', out),
+            Script::Sub(sub) => {
+                self.inline_sub_or_sup(sub, out.conf.with_sub(), '_', self.sub_placeholder(), out)
+            }
+            Script::Super(sup) => {
+                self.inline_sub_or_sup(sup, out.conf.with_sup(), '^', self.sup_placeholder(), out)
+            }
             Script::Subsuper(sub, sup) => {
-                if let Some(sub_conf) = out.conf.with_sub()
-                    && let Some(lower) = self.mapped_operand(sub, sub_conf)
-                    && let Some(sup_conf) = out.conf.with_sup()
-                    && let Some(upper) = self.mapped_operand(sup, sup_conf)
+                if let Some(lower) =
+                    self.mapped_script(sub, out.conf.with_sub(), self.sub_placeholder())
+                    && let Some(upper) =
+                        self.mapped_script(sup, out.conf.with_sup(), self.sup_placeholder())
                 {
                     out.inner.write_str(&lower)?;
                     out.inner.write_str(&upper)
@@ -718,7 +798,11 @@ impl Conf {
     fn inline_func(self, func: &Func<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
         out.write_str(func.func)?;
         self.inline_script(&func.script, out)?;
-        self.inline_applied_arg(func.arg(), func_hugs_argument(func), out)
+        if func.arg().as_simple().is_some_and(name_without_argument) {
+            Ok(())
+        } else {
+            self.inline_applied_arg(func.arg(), func_hugs_argument(func), out)
+        }
     }
 
     fn inline_scriptfunc(
@@ -840,7 +924,7 @@ impl Conf {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Conf, Layout, SkinTone};
+    use super::super::{Conf, Layout, Placeholders, SkinTone};
 
     #[test]
     fn example() {
@@ -1636,6 +1720,173 @@ mod tests {
         // `x^` leaves the script base `Simple::Missing`, which renders to nothing
         let res = super::super::parse_unicode("x^").to_string();
         assert_eq!(res, "x");
+    }
+
+    #[test]
+    fn placeholders_are_off_by_default() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("sum_"), "∑");
+        assert_eq!(render("1/"), "⅟");
+        assert_eq!(render("sqrt"), "√");
+        assert_eq!(render("bb"), "");
+        assert_eq!(render("text"), "");
+        assert_eq!(render("sqrt("), "√(");
+        assert_eq!(render("1/()"), "⅟");
+        assert_eq!(render("[[1,2],[3,]]"), "[[1,2],[3,]]");
+        assert_eq!(render("[[],[]]"), "[[],[]]");
+        assert_eq!(render("[[1,2],[,]]"), "[[1,2],[,]]");
+        assert_eq!(render("[(a,|,b),(c,|,d)]"), "[[a|b],[c|d]]");
+        assert_eq!(render("[(a,|,b),(c,|,)]"), "[[a|b],[c|]]");
+    }
+
+    #[test]
+    fn placeholders_for_missing_arguments() {
+        let conf = Conf::default().with_placeholders(Some(Placeholders::default()));
+        let render = |inp: &str| conf.parse(inp).to_string();
+        assert_eq!(render("sqrt"), "√□");
+        assert_eq!(render("bb"), "□");
+        assert_eq!(render("text"), "□");
+        assert_eq!(render("abs"), "|□|");
+        assert_eq!(render("root 3"), "∛□");
+        assert_eq!(render("root"), "root □ □");
+        assert_eq!(render("1/2 + bb"), "½+□");
+        // nothing is missing once the argument is there
+        assert_eq!(render("sqrt x"), "√x");
+        assert_eq!(render("bb R"), "𝐑");
+    }
+
+    #[test]
+    fn placeholders_for_missing_fraction_parts() {
+        let conf = Conf::default().with_placeholders(Some(Placeholders::default()));
+        let render = |inp: &str| conf.parse(inp).to_string();
+        assert_eq!(render("1/"), "1/□");
+        assert_eq!(render("x/"), "x/□");
+        assert_eq!(render("frac"), "□/□");
+        assert_eq!(render("frac 1"), "1/□");
+        assert_eq!(render("x^(1/)"), "x^(1/□)");
+        assert_eq!(render("1/2"), "½");
+    }
+
+    #[test]
+    fn placeholders_for_missing_scripts() {
+        let conf = Conf::default().with_placeholders(Some(Placeholders::default()));
+        let render = |inp: &str| conf.parse(inp).to_string();
+        assert_eq!(render("x^"), "x⸋");
+        assert_eq!(render("sum_"), "∑▫");
+        assert_eq!(render("sum_(i=1)^"), "∑ᵢ₌₁⸋");
+        assert_eq!(render("sin^"), "sin⸋");
+        assert_eq!(render("sqrt(x^"), "√(x⸋");
+        // nothing can be raised twice, so the inner script falls back to a literal marker
+        assert_eq!(render("x^(y^)"), "x^(y⸋)");
+        assert_eq!(render("underset x"), "□ₓ");
+        assert_eq!(render("overset"), "□⸋");
+        // after a literal marker the script is an ordinary missing argument
+        assert_eq!(render("x_y^"), "x_y^□");
+    }
+
+    #[test]
+    fn placeholders_for_empty_groups() {
+        let conf = Conf::default().with_placeholders(Some(Placeholders::default()));
+        let render = |inp: &str| conf.parse(inp).to_string();
+        assert_eq!(render("sqrt("), "√□");
+        assert_eq!(render("sqrt()"), "√□");
+        assert_eq!(render("1/("), "1/□");
+        assert_eq!(render("abs()"), "|□|");
+        assert_eq!(render("x^("), "x⸋");
+        assert_eq!(render("x_()"), "x▫");
+        assert_eq!(render("("), "□");
+        assert_eq!(render("{: :}"), "□");
+        assert_eq!(render("[]"), "□");
+        // an operand is there, even if what follows it isn't
+        assert_eq!(render("(x+)"), "(x+)");
+        // a bracket the person typed is not a part that is missing
+        assert_eq!(render(")"), ")");
+        // brackets that do more than group stay, with the mark between them
+        assert_eq!(render("(: :)"), "⟨□⟩");
+        assert_eq!(render("<<>>"), "⟨□⟩");
+    }
+
+    #[test]
+    fn placeholders_for_empty_matrix_cells() {
+        let conf = Conf::default().with_placeholders(Some(Placeholders::default()));
+        let render = |inp: &str| conf.parse(inp).to_string();
+        assert_eq!(render("[[1,2],[3,]]"), "[[1,2],[3,□]]");
+        assert_eq!(render("[[],[]]"), "[[□],[□]]");
+        assert_eq!(render("[[1,2],[,]]"), "[[1,2],[□,□]]");
+        assert_eq!(render("[[1,2],[3,4]]"), "[[1,2],[3,4]]");
+        // the lines of an augmented matrix are untouched
+        assert_eq!(render("[(a,|,b),(c,|,d)]"), "[[a|b],[c|d]]");
+        assert_eq!(render("[(a,|,b),(c,|,)]"), "[[a|b],[c|□]]");
+        assert_eq!(render("[(|,a,b,|),(|,c,d,|)]"), "[[|a,b|],[|c,d|]]");
+    }
+
+    #[test]
+    fn placeholders_keep_brackets_that_are_not_dropped() {
+        let conf = Conf::default()
+            .with_strip_brackets(false)
+            .with_placeholders(Some(Placeholders::default()));
+        let render = |inp: &str| conf.parse(inp).to_string();
+        assert_eq!(render("abs()"), "|(□)|");
+        assert_eq!(render("x^()"), "x^(□)");
+        assert_eq!(render("sqrt()"), "√(□)");
+        assert_eq!(render("("), "(□");
+        assert_eq!(render(")"), ")");
+        assert_eq!(render("[[1,2],["), "[[1,2],[□");
+    }
+
+    #[test]
+    fn placeholders_leave_empty_quotes_alone() {
+        let conf = Conf::default().with_placeholders(Some(Placeholders::default()));
+        let render = |inp: &str| conf.parse(inp).to_string();
+        // an empty quote is text the person wrote, not a part being typed
+        assert_eq!(render("\"\""), "");
+        assert_eq!(render("text()"), "");
+        assert_eq!(render("text("), "");
+        assert_eq!(render("x = \"\""), "x=");
+    }
+
+    #[test]
+    fn placeholders_with_plain_fractions() {
+        let conf = Conf {
+            layout: Layout::InlinePlain,
+            placeholders: Some(Placeholders::default()),
+            ..Default::default()
+        };
+        let render = |inp: &str| conf.parse(inp).to_string();
+        assert_eq!(render("(x/n)/"), "(x/n)/□");
+        assert_eq!(render("x/n+1/"), "x/n+1/□");
+        // a mark has no raised or lowered form, so a fraction holding one keeps its slash
+        // whichever one-line layout is picked
+        let scripted = Conf {
+            layout: Layout::InlineScript,
+            ..conf
+        };
+        assert_eq!(scripted.parse("(x/n)/").to_string(), "(ˣ⁄ₙ)/□");
+    }
+
+    #[test]
+    fn placeholders_can_be_chosen() {
+        let marks = Placeholders::default()
+            .with_char('?')
+            .with_sub('.')
+            .with_sup('!');
+        let conf = Conf::default().with_placeholders(Some(marks));
+        let render = |inp: &str| conf.parse(inp).to_string();
+        assert_eq!(render("sqrt"), "√?");
+        assert_eq!(render("1/"), "1/?");
+        assert_eq!(render("x_"), "x.");
+        assert_eq!(render("x^"), "x!");
+        assert_eq!(render("sum_(i=1)^"), "∑ᵢ₌₁!");
+    }
+
+    #[test]
+    fn function_names_take_no_placeholder() {
+        let conf = Conf::default().with_placeholders(Some(Placeholders::default()));
+        let render = |inp: &str| conf.parse(inp).to_string();
+        assert_eq!(render("f"), "f");
+        assert_eq!(render("sin"), "sin");
+        assert_eq!(render("sin^2"), "sin²");
+        assert_eq!(render("sqrt sin"), "√sin");
     }
 
     #[test]

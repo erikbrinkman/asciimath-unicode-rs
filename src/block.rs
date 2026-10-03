@@ -4,7 +4,9 @@ use std::{fmt, iter};
 use unicode_width::UnicodeWidthStr;
 
 use super::Conf;
-use super::ast::{func_hugs_argument, hugs_argument, is_spaced_operator, needs_space};
+use super::ast::{
+    func_hugs_argument, hugs_argument, is_spaced_operator, name_without_argument, needs_space,
+};
 use super::inline::{Mapper, MapperConf, Operand, column_rules};
 use super::tokens::{left_bracket_str, right_bracket_str, subscript_char, superscript_char};
 
@@ -406,27 +408,28 @@ impl Conf {
     }
 
     fn block_apply_script(self, base: Block, script: &Script<'_>) -> Block {
-        let lower_conf = MapperConf {
+        let lower_conf = Some(MapperConf {
             sub_sup: Some(subscript_char),
             ..MapperConf::default()
-        };
-        let upper_conf = MapperConf {
+        });
+        let upper_conf = Some(MapperConf {
             sub_sup: Some(superscript_char),
             ..MapperConf::default()
-        };
+        });
         match script {
             Script::None => base,
-            Script::Sub(sub) => match self.mapped_operand(sub, lower_conf) {
+            Script::Sub(sub) => match self.mapped_script(sub, lower_conf, self.sub_placeholder()) {
                 Some(text) => base.beside(Block::text(text)),
                 None => base.with_scripts(Some(self.block_simple_stripped(sub)), None),
             },
-            Script::Super(sup) => match self.mapped_operand(sup, upper_conf) {
+            Script::Super(sup) => match self.mapped_script(sup, upper_conf, self.sup_placeholder())
+            {
                 Some(text) => base.beside(Block::text(text)),
                 None => base.with_scripts(None, Some(self.block_simple_stripped(sup))),
             },
             Script::Subsuper(sub, sup) => {
-                if let Some(lower) = self.mapped_operand(sub, lower_conf)
-                    && let Some(upper) = self.mapped_operand(sup, upper_conf)
+                if let Some(lower) = self.mapped_script(sub, lower_conf, self.sub_placeholder())
+                    && let Some(upper) = self.mapped_script(sup, upper_conf, self.sup_placeholder())
                 {
                     base.beside(Block::text(format!("{lower}{upper}")))
                 } else {
@@ -440,20 +443,27 @@ impl Conf {
     }
 
     fn block_simple(self, simple: &Simple<'_>) -> Block {
-        match simple {
-            Simple::Missing => Block::empty(),
-            Simple::Group(group) => self.block_group(group),
-            Simple::Matrix(matrix) => self.block_matrix(matrix),
-            Simple::Unary(unary) => self.block_unary(unary),
-            Simple::Binary(binary) => self.block_binary(binary),
-            Simple::Func(func) => self.block_simplefunc(func),
-            _ => self.block_inline_simple(simple),
+        match self.placeholder(simple) {
+            Some(chr) => Block::text(chr),
+            None => match simple {
+                Simple::Missing => Block::empty(),
+                Simple::Group(group) => self.block_group(group),
+                Simple::Matrix(matrix) => self.block_matrix(matrix),
+                Simple::Unary(unary) => self.block_unary(unary),
+                Simple::Binary(binary) => self.block_binary(binary),
+                Simple::Func(func) => self.block_simplefunc(func),
+                _ => self.block_inline_simple(simple),
+            },
         }
     }
 
     fn block_simplefunc(self, func: &SimpleFunc<'_>) -> Block {
         let name = Block::text(func.func);
-        let arg = self.block_simple(func.arg());
+        let arg = if name_without_argument(func.arg()) {
+            Block::empty()
+        } else {
+            self.block_simple(func.arg())
+        };
         if hugs_argument(func.arg()) || arg.width == 0 {
             name.beside(arg)
         } else {
@@ -532,10 +542,20 @@ impl Conf {
     }
 
     fn block_group(self, group: &Group<'_>) -> Block {
-        let inner = self.block_expression(&group.expr);
+        let inner = match self.group_placeholder(group) {
+            Some(chr) => Block::text(chr),
+            None => self.block_expression(&group.expr),
+        };
         let left = left_bracket_str(group.left_bracket);
         let right = right_bracket_str(group.right_bracket);
         inner.with_brackets(left, right)
+    }
+
+    fn block_cell(self, expr: &Expression<'_>) -> Block {
+        match self.empty_placeholder(expr) {
+            Some(chr) => Block::text(chr),
+            None => self.block_expression(expr),
+        }
     }
 
     fn block_matrix(self, matrix: &Matrix<'_>) -> Block {
@@ -543,7 +563,7 @@ impl Conf {
 
         let rows: Vec<Vec<Block>> = matrix
             .rows()
-            .map(|row| row.iter().map(|expr| self.block_expression(expr)).collect())
+            .map(|row| row.iter().map(|expr| self.block_cell(expr)).collect())
             .collect();
         let col_widths: Vec<usize> = (0..num_cols)
             .map(|col| {
@@ -603,7 +623,11 @@ impl Conf {
     fn block_func(self, func: &Func<'_>) -> Block {
         let name = Block::text(func.func);
         let name_with_script = self.block_apply_script(name, &func.script);
-        let arg = self.block_scriptfunc(func.arg());
+        let arg = if func.arg().as_simple().is_some_and(name_without_argument) {
+            Block::empty()
+        } else {
+            self.block_scriptfunc(func.arg())
+        };
         if func_hugs_argument(func) || arg.width == 0 {
             name_with_script.beside(arg)
         } else {
@@ -615,8 +639,8 @@ impl Conf {
 #[cfg(test)]
 mod tests {
     use super::{Block, Conf};
-    use crate::Layout;
     use crate::tokens;
+    use crate::{Layout, Placeholders};
     use std::fmt::Write;
 
     fn render_block(input: &str) -> String {
@@ -754,6 +778,65 @@ mod tests {
         };
         let result = render_block_conf("x/(y+1)", conf);
         assert_eq!(result, "  x\n─────\ny + 1");
+    }
+
+    #[test]
+    fn placeholders() {
+        let conf = Conf {
+            layout: Layout::Block,
+            placeholders: Some(Placeholders::default()),
+            ..Default::default()
+        };
+        assert_eq!(render_block_conf("1/", conf), "1\n─\n□");
+        assert_eq!(render_block_conf("sqrt", conf), "√□");
+        assert_eq!(render_block_conf("x^", conf), "x⸋");
+        assert_eq!(render_block_conf("sum_", conf), "∑▫");
+        assert_eq!(render_block_conf("sum_(i=1)^", conf), "∑ᵢ₌₁⸋");
+        assert_eq!(render_block_conf("x_y^", conf), " □\nx\n y");
+        assert_eq!(render_block_conf("f", conf), "f");
+        assert_eq!(render_block_conf("sin", conf), "sin");
+        assert_eq!(render_block_conf("sqrt sin", conf), "√sin");
+        assert_eq!(render_block_conf("x/(", conf), "x\n─\n□");
+        assert_eq!(render_block_conf("(1/2)/(", conf), "½\n─\n□");
+        assert_eq!(render_block_conf(")", conf), ")");
+        assert_eq!(render_block_conf("(: :)", conf), "⟨□⟩");
+        assert_eq!(render_block_conf("\"\"", conf), "");
+        assert_eq!(render_block_conf("[[1,2],[3,]]", conf), "⎡1  2⎤\n⎣3  □⎦");
+        assert_eq!(render_block_conf("[[],[]]", conf), "⎡□⎤\n⎣□⎦");
+        assert_eq!(render_block_conf("[[1,2],[,]]", conf), "⎡1  2⎤\n⎣□  □⎦");
+        assert_eq!(render_block_conf("[[1,2],[3,4]]", conf), "⎡1  2⎤\n⎣3  4⎦");
+        // the lines of an augmented matrix are untouched
+        assert_eq!(
+            render_block_conf("[(a,|,b),(c,|,d)]", conf),
+            "⎡a │ b⎤\n⎣c │ d⎦"
+        );
+        assert_eq!(
+            render_block_conf("[(a,|,b),(c,|,)]", conf),
+            "⎡a │ b⎤\n⎣c │ □⎦"
+        );
+        let kept = Conf {
+            strip_brackets: false,
+            ..conf
+        };
+        assert_eq!(render_block_conf("abs()", kept), "|(□)|");
+        assert_eq!(render_block_conf("[[1,2],[", kept), "[[1,2],[□");
+        let bare = Conf {
+            placeholders: None,
+            ..conf
+        };
+        assert_eq!(render_block_conf("[[1,2],[3,]]", bare), "⎡1  2⎤\n⎣3   ⎦");
+        assert_eq!(render_block_conf("[[],[]]", bare), "⎡⎤\n⎣⎦");
+        assert_eq!(render_block_conf("[[1,2],[,]]", bare), "⎡1  2⎤\n⎣    ⎦");
+        assert_eq!(
+            render_block_conf("[(a,|,b),(c,|,d)]", bare),
+            "⎡a │ b⎤\n⎣c │ d⎦"
+        );
+        assert_eq!(
+            render_block_conf("[(a,|,b),(c,|,)]", bare),
+            "⎡a │ b⎤\n⎣c │  ⎦"
+        );
+        assert_eq!(render_block("1/"), "1\n─\n");
+        assert_eq!(render_block("x^"), "x");
     }
 
     #[test]
@@ -966,6 +1049,8 @@ mod tests {
         // a function applied to a multiline argument renders beside it.
         let result = render_block_conf("sin(x/y)", stacked());
         assert_eq!(result, "   ⎛x⎞\nsin⎜─⎟\n   ⎝y⎠");
+        // an argument that does not hug the name is set off by a space
+        assert_eq!(render_block_conf("x^sin Q", stacked()), " sin Q\nx");
     }
 
     #[test]
