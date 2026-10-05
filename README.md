@@ -66,6 +66,7 @@ assert_eq!(res, "x\n─\ny");
 | `skin_tone`      |             `SkinTone` |      `Default` | Default skin tone for emojis                                          |
 | `layout`         |               `Layout` | `InlineScript` | How to lay out the math: `InlineScript`, `InlinePlain`, or `Block`    |
 | `placeholders`   | `Option<Placeholders>` |         `None` | What stands in for the parts that aren't there yet                    |
+| `keep_spaces`    |                 `bool` |        `false` | Write the whitespace typed between parts of the math back out         |
 
 `Placeholders` holds the marks themselves: `char` for an argument, fraction part, bracket pair or
 matrix cell with nothing in it, `sub` for a subscript and `sup` for a superscript, defaulting to
@@ -73,3 +74,11 @@ matrix cell with nothing in it, `sub` for a subscript and `sup` for a superscrip
 
 Whether the mark replaces a bracket pair with nothing in it or sits between the brackets follows
 `strip_brackets`: `abs()` renders `|□|` by default and `|(□)|` with the brackets kept.
+
+`keep_spaces` keeps only the whitespace between two neighboring parts, and where none was typed the
+usual spacing still applies, so `sinx` renders `sin x` either way.  A `+` or `-` that applies to the
+part after it rather than joining two parts is written against that part, so `1 - - x` renders
+`1 - -x`.  A one-line layout writes a kept run as typed, tabs and newlines included, while `Block`
+writes it as plain spaces as wide as the run printed, since a tab or newline would throw off the
+lines it stacks, and drops what was typed inside a grid.  A space that lands in a script is written
+one step narrower, so `x^(a b)` renders `xᵃ ᵇ` with a thin space rather than a full one.

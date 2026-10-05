@@ -7,16 +7,18 @@ use asciimath_parser::tree::{
 use std::fmt;
 use std::fmt::Write;
 use unicode_normalization::char::compose;
+use unicode_width::UnicodeWidthStr;
 
-use super::Conf;
 use super::ast::{
-    extract_vulgar_frac, func_hugs_argument, hugs_argument, is_empty_grouping,
-    name_without_argument, needs_space, paren_contents, unwrap_parens,
+    extract_vulgar_frac, frac_edges, func_hugs_argument, hugs_argument, is_empty_grouping,
+    is_operator_to_a_sign, is_unary_sign, name_without_argument, needs_space, paren_contents,
+    scriptfunc_edges, unwrap_parens,
 };
 use super::tokens::{
     bold_map, cal_map, double_map, frak_map, italic_map, left_bracket_str, mono_map,
     right_bracket_str, sans_map, subscript_char, superscript_char, symbol_str,
 };
+use super::{Conf, Layout};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MapperConf {
@@ -241,10 +243,16 @@ fn combining_letter(letter: &str) -> Option<char> {
 
 /// Whether `simple` is a prefix minus and its operand, which reads badly after `⅟`
 fn is_negated(simple: &Simple<'_>) -> bool {
-    matches!(
-        paren_contents(simple).map(|expr| &**expr),
-        Some([Intermediate::ScriptFunc(script_func!(oper!("-"))), _])
-    )
+    paren_contents(simple).is_some_and(|expr| {
+        let mut parts = expr
+            .iter()
+            .filter(|inter| !matches!(inter, Intermediate::Space(_)));
+        matches!(
+            parts.next(),
+            Some(Intermediate::ScriptFunc(script_func!(oper!("-"))))
+        ) && parts.next().is_some()
+            && parts.next().is_none()
+    })
 }
 
 /// How many vertical lines the matrix draws at a column boundary
@@ -654,7 +662,7 @@ impl Conf {
                 if let Some(chr) = self.empty_placeholder(expr) {
                     out.write_char(chr)?;
                 } else {
-                    self.inline_expression(expr, out)?;
+                    self.grid_cell().inline_expression(expr, out)?;
                 }
             }
             for _ in 0..column_rules(matrix, row.len()) {
@@ -879,44 +887,64 @@ impl Conf {
         denom.inline_as_written(self, out)
     }
 
-    fn inline_intermediate(
-        self,
-        inter: &Intermediate<'_>,
-        out: &mut Mapper<impl fmt::Write>,
-    ) -> fmt::Result {
-        match inter {
-            Intermediate::ScriptFunc(sf) => self.inline_scriptfunc(sf, out),
-            Intermediate::Frac(frac) => {
-                let compact = self.mapped_frac(&frac.numer, &frac.denom, out);
-                if let Some(text) = compact {
-                    out.inner.write_str(&text)
-                } else {
-                    self.inline_plain_frac(&frac.numer, &frac.denom, out)
-                }
-            }
-        }
-    }
-
     pub(crate) fn inline_expression(
         self,
         expr: &Expression<'_>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
-        let mut prev = None;
+        let mut prev_edge = None;
+        let mut prev_is_operator = None;
+        let mut prev_unary_sign = false;
+        // the runs typed on both sides of an item that renders to nothing both belong in the output
+        let mut typed = String::new();
         for inter in expr.iter() {
             // an item that renders to nothing, like an empty group, must not leave a space behind
             let mut text = String::new();
-            self.inline_intermediate(inter, &mut out.onto(&mut text))?;
+            let (leading_edge, trailing_edge) = {
+                let mut item = out.onto(&mut text);
+                match inter {
+                    Intermediate::Space(space) => {
+                        if self.keep_spaces {
+                            typed.push_str(space);
+                        }
+                        continue;
+                    }
+                    Intermediate::ScriptFunc(func) => {
+                        self.inline_scriptfunc(func, &mut item)?;
+                        scriptfunc_edges(func)
+                    }
+                    Intermediate::Frac(frac) => {
+                        match self.mapped_frac(&frac.numer, &frac.denom, &item) {
+                            Some(compact) => item.inner.write_str(&compact)?,
+                            None => self.inline_plain_frac(&frac.numer, &frac.denom, &mut item)?,
+                        }
+                        frac_edges(frac)
+                    }
+                }
+            };
             if text.is_empty() {
                 continue;
             }
-            if let Some(prev) = prev
-                && needs_space(prev, inter)
-            {
-                out.write_char(' ')?;
+            let unary_sign = is_unary_sign(inter, prev_is_operator);
+            if let Some(prev_edge) = prev_edge {
+                // a run typed after a unary sign is dropped: the sign hugs its operand
+                if typed.is_empty() || prev_unary_sign {
+                    if needs_space(prev_edge, leading_edge) {
+                        out.write_char(' ')?;
+                    }
+                } else if self.layout == Layout::Block {
+                    // the multi-line layout places this rendering as one of its lines, so a typed
+                    // tab or newline would throw off its width
+                    out.write_str(&" ".repeat(UnicodeWidthStr::width(&*typed)))?;
+                } else {
+                    out.write_str(&typed)?;
+                }
             }
             out.inner.write_str(&text)?;
-            prev = Some(inter);
+            prev_edge = Some(trailing_edge);
+            prev_is_operator = Some(is_operator_to_a_sign(inter, trailing_edge));
+            prev_unary_sign = unary_sign;
+            typed.clear();
         }
         Ok(())
     }
@@ -1919,6 +1947,121 @@ mod tests {
     }
 
     #[test]
+    fn spaces_are_dropped_by_default() {
+        let conf = Conf::default();
+        assert_eq!(conf.parse("a + b").to_string(), "a+b");
+        assert_eq!(conf.parse("(- x) y").to_string(), "(-x)y");
+    }
+
+    #[test]
+    fn kept_spaces_are_written_as_typed() {
+        let conf = Conf::default().with_keep_spaces(true);
+        assert_eq!(conf.parse(" a  +\tb ").to_string(), "a  +\tb");
+        assert_eq!(conf.parse("(a , b)").to_string(), "(a , b)");
+        assert_eq!(conf.parse("x^(a b)").to_string(), "xᵃ\u{2009}ᵇ");
+        assert_eq!(
+            conf.parse("[[a b, c], [d, e]]").to_string(),
+            "[[a b,c],[d,e]]"
+        );
+    }
+
+    #[test]
+    fn kept_spaces_within_one_part_are_dropped() {
+        let conf = Conf::default().with_keep_spaces(true);
+        assert_eq!(conf.parse("1 / 2  x ^ 2").to_string(), "½  x²");
+        assert_eq!(conf.parse("sqrt  x").to_string(), "√x");
+    }
+
+    #[test]
+    fn kept_spaces_leave_needed_spaces_alone() {
+        let conf = Conf::default().with_keep_spaces(true);
+        assert_eq!(conf.parse("sinx lim_x y").to_string(), "sin x limₓ y");
+        assert_eq!(conf.parse("sin x").to_string(), "sin x");
+    }
+
+    #[test]
+    fn kept_spaces_outlive_what_renders_to_nothing() {
+        let conf = Conf::default().with_keep_spaces(true);
+        assert_eq!(conf.parse("g ubrace").to_string(), "g");
+        assert_eq!(conf.parse("obrace() a").to_string(), "a");
+        assert_eq!(conf.parse("a  obrace() b").to_string(), "a   b");
+        assert_eq!(conf.parse("a  obrace()  b").to_string(), "a    b");
+    }
+
+    #[test]
+    fn kept_spaces_do_not_hide_a_negated_denominator() {
+        let conf = Conf::default();
+        assert_eq!(conf.parse("1/(- x)").to_string(), "¹⁄₋ₓ");
+        assert_eq!(
+            conf.with_keep_spaces(true).parse("1/(- x)").to_string(),
+            "¹⁄₋ₓ"
+        );
+    }
+
+    #[test]
+    fn a_kept_space_after_a_unary_sign_is_dropped() {
+        let conf = Conf::default().with_keep_spaces(true);
+        let render = |inp: &str| conf.parse(inp).to_string();
+        assert_eq!(render("- x"), "-x");
+        assert_eq!(render("+ x"), "+x");
+        assert_eq!(render("+- x"), "±x");
+        assert_eq!(render("pm x"), "±x");
+        assert_eq!(render("-+ x"), "∓x");
+        assert_eq!(render("mp x"), "∓x");
+        assert_eq!(render("1 + - x"), "1 + -x");
+        assert_eq!(render("a (- b)"), "a (-b)");
+        assert_eq!(render("- (a + b)"), "-(a + b)");
+        assert_eq!(render("(- x)/2"), "⁻ˣ⁄₂");
+        assert_eq!(render("x^(- a)"), "x⁻ᵃ");
+        assert_eq!(render("x_(- a)"), "x₋ₐ");
+        assert_eq!(render("[[- a, b], [c, - d]]"), "[[-a,b],[c,-d]]");
+        // a comma and a big operator without scripts are operators to a sign after them
+        assert_eq!(render("(1, - 2)"), "(1, -2)");
+        assert_eq!(render("f(x, - y)"), "f(x, -y)");
+        assert_eq!(render("sum - x"), "∑ -x");
+        assert_eq!(render("int - x"), "∫ -x");
+        // a sign with nothing after it has no operand to hug
+        assert_eq!(render("-"), "-");
+        assert_eq!(render("- "), "-");
+    }
+
+    #[test]
+    fn a_kept_space_around_a_binary_sign_stays() {
+        let conf = Conf::default().with_keep_spaces(true);
+        let render = |inp: &str| conf.parse(inp).to_string();
+        assert_eq!(render("a - b"), "a - b");
+        assert_eq!(render("a  -  b"), "a  -  b");
+        assert_eq!(render("a  -\tb"), "a  -\tb");
+        assert_eq!(render("- x + y"), "-x + y");
+        // the second sign follows an operator, so only the space after it goes
+        assert_eq!(render("a - - b"), "a - -b");
+        // a big operator with scripts is no operator to a sign after it
+        assert_eq!(render("sum_(i=1)^n - i"), "∑ᵢ₌₁ⁿ - i");
+    }
+
+    #[test]
+    fn kept_tabs_and_newlines_are_written_as_typed() {
+        let conf = Conf::default().with_keep_spaces(true);
+        assert_eq!(conf.parse("a\tb").to_string(), "a\tb");
+        assert_eq!(conf.parse("a\nb").to_string(), "a\nb");
+        assert_eq!(conf.parse("a\n\nb").to_string(), "a\n\nb");
+    }
+
+    #[test]
+    fn kept_spaces_in_a_script_step_narrower() {
+        let conf = Conf::default().with_keep_spaces(true);
+        let render = |inp: &str| conf.parse(inp).to_string();
+        assert_eq!(render("x^(a b)"), "xᵃ\u{2009}ᵇ");
+        assert_eq!(render("x^(a\tb)"), "xᵃ\u{2009}ᵇ");
+        assert_eq!(render("x^(a\u{2003}b)"), "xᵃ\u{2002}ᵇ");
+        assert_eq!(render("x^(a\u{200a}b)"), "xᵃ\u{200a}ᵇ");
+        assert_eq!(render("x_(i j)"), "xᵢ\u{2009}ⱼ");
+        assert_eq!(render("x_(i\tj)"), "xᵢ\u{2009}ⱼ");
+        assert_eq!(render("x_(i\u{2003}j)"), "xᵢ\u{2002}ⱼ");
+        assert_eq!(render("x_(i\u{200a}j)"), "xᵢ\u{200a}ⱼ");
+    }
+
+    #[test]
     fn a_space_symbol_in_a_script_steps_narrower() {
         let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("x^(a quad b)"), "xᵃ\u{2002}ᵇ");
@@ -1933,5 +2076,29 @@ mod tests {
         };
         assert_eq!(plain.parse("x^(a quad b)").to_string(), "xᵃ\u{2002}ᵇ");
         assert_eq!(plain.parse("x^(a quad b)/y").to_string(), "xᵃ\u{2002}ᵇ/y");
+    }
+
+    #[test]
+    fn kept_spaces_with_plain_fractions() {
+        let conf = Conf {
+            layout: Layout::InlinePlain,
+            keep_spaces: true,
+            ..Default::default()
+        };
+        assert_eq!(conf.parse("x / y   z").to_string(), "x/y   z");
+        assert_eq!(conf.parse("1 / 2  x ^ 2").to_string(), "½  x²");
+        assert_eq!(conf.parse("a\tb").to_string(), "a\tb");
+    }
+
+    #[test]
+    fn kept_spaces_with_placeholders() {
+        let conf = Conf::default()
+            .with_keep_spaces(true)
+            .with_placeholders(Some(Placeholders::default()));
+        let render = |inp: &str| conf.parse(inp).to_string();
+        // the mark renders, so neither run around it is joined to the other
+        assert_eq!(render("a  obrace() b"), "a  □ b");
+        assert_eq!(render("obrace() a"), "□ a");
+        assert_eq!(render("[[a  b,],[d,e]]"), "[[a  b,□],[d,e]]");
     }
 }

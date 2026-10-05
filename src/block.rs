@@ -1,12 +1,12 @@
 #![allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
 
-use std::{fmt, iter};
+use std::{fmt, iter, mem};
 use unicode_width::UnicodeWidthStr;
 
 use super::Conf;
 use super::ast::{
-    func_hugs_argument, hugs_argument, is_big_operator, is_spaced_operator, name_without_argument,
-    needs_space,
+    frac_edges, func_hugs_argument, hugs_argument, inter_is_spaced_op, is_operator_to_a_sign,
+    is_unary_sign, name_without_argument, needs_space, scriptfunc_edges,
 };
 use super::inline::{Mapper, MapperConf, Operand, column_rules};
 use super::tokens::{left_bracket_str, right_bracket_str, subscript_char, superscript_char};
@@ -332,41 +332,6 @@ fn column_separator(rules: usize, boundary: usize, num_cols: usize) -> String {
     format!("{gap}{}{gap}", "\u{2502}".repeat(rules))
 }
 
-fn is_sign(inter: &Intermediate<'_>) -> bool {
-    matches!(
-        inter,
-        Intermediate::ScriptFunc(ScriptFunc::Simple(SimpleScript {
-            simple: Simple::Symbol("+" | "-" | "+-" | "pm" | "-+" | "mp")
-                | Simple::Operator("+" | "-"),
-            script: Script::None,
-        }))
-    )
-}
-
-fn inter_is_spaced_op(inter: &Intermediate<'_>) -> bool {
-    match inter {
-        Intermediate::ScriptFunc(ScriptFunc::Simple(SimpleScript {
-            simple: Simple::Symbol(sym) | Simple::Operator(sym),
-            script: Script::None,
-        })) => is_spaced_operator(sym),
-        _ => false,
-    }
-}
-
-/// Whether an item acts as an operator to a sign written after it
-///
-/// A comma and a big operator without scripts separate what they stand between as much as a
-/// spaced operator does, so a sign after one of them applies to the operand after it.
-fn is_operator_to_a_sign(inter: &Intermediate<'_>) -> bool {
-    match inter {
-        Intermediate::ScriptFunc(ScriptFunc::Simple(SimpleScript {
-            simple: Simple::Symbol(sym) | Simple::Operator(sym),
-            script: Script::None,
-        })) => *sym == "," || is_big_operator(sym) || is_spaced_operator(sym),
-        _ => false,
-    }
-}
-
 impl Conf {
     fn block_inline_simple(self, simple: &Simple<'_>) -> Block {
         let mut s = String::new();
@@ -376,38 +341,51 @@ impl Conf {
     }
 
     pub(crate) fn block_expression(self, expr: &Expression<'_>) -> Block {
-        // an item that renders to nothing, like an empty group, must not leave a space behind
-        let mut items = expr
-            .iter()
-            .map(|inter| (inter, self.block_intermediate(inter)))
-            .filter(|(_, block)| block.width > 0);
-        let Some((first, first_block)) = items.next() else {
+        // the runs typed on both sides of an item that renders to nothing both belong in the output
+        let mut typed_width = 0;
+        let mut items = expr.iter().filter_map(|inter| {
+            let rendered = match inter {
+                Intermediate::Space(space) => {
+                    if self.keep_spaces {
+                        typed_width += UnicodeWidthStr::width(*space);
+                    }
+                    None
+                }
+                Intermediate::ScriptFunc(func) => {
+                    Some((self.block_scriptfunc(func), scriptfunc_edges(func)))
+                }
+                Intermediate::Frac(frac) => Some((self.block_frac(frac), frac_edges(frac))),
+            };
+            // an item that renders to nothing, like an empty group, must not leave a space behind
+            rendered
+                .filter(|(block, _)| block.width > 0)
+                .map(|(block, edges)| (inter, block, edges, mem::take(&mut typed_width)))
+        });
+        let Some((first, first_block, (_, first_trailing_edge), _)) = items.next() else {
             return Block::empty();
         };
         let mut result = first_block;
-        let mut prev = first;
-        // a sign at the start or right after another operator is unary and hugs its operand
-        let mut prev_binary_op = inter_is_spaced_op(first) && !is_sign(first);
-        let mut prev_is_operator = is_operator_to_a_sign(first);
-        for (inter, block) in items {
+        let mut prev_edge = first_trailing_edge;
+        let mut prev_is_operator = is_operator_to_a_sign(first, first_trailing_edge);
+        let mut prev_unary_sign = is_unary_sign(first, None);
+        let mut prev_binary_op = inter_is_spaced_op(first) && !prev_unary_sign;
+        for (inter, block, (leading_edge, trailing_edge), typed_width) in items {
             let is_op = inter_is_spaced_op(inter);
-            let binary_op = is_op && !(prev_is_operator && is_sign(inter));
-            if prev_binary_op || binary_op || needs_space(prev, inter) {
+            let unary_sign = is_unary_sign(inter, Some(prev_is_operator));
+            let binary_op = is_op && !unary_sign;
+            // a run typed after a unary sign is dropped: the sign hugs its operand
+            if typed_width > 0 && !prev_unary_sign {
+                result = result.beside(Block::space(typed_width));
+            } else if prev_binary_op || binary_op || needs_space(prev_edge, leading_edge) {
                 result = result.beside(Block::space(1));
             }
             result = result.beside(block);
-            prev = inter;
-            prev_is_operator = is_operator_to_a_sign(inter);
+            prev_edge = trailing_edge;
+            prev_is_operator = is_operator_to_a_sign(inter, trailing_edge);
+            prev_unary_sign = unary_sign;
             prev_binary_op = binary_op;
         }
         result
-    }
-
-    fn block_intermediate(self, inter: &Intermediate<'_>) -> Block {
-        match inter {
-            Intermediate::ScriptFunc(sf) => self.block_scriptfunc(sf),
-            Intermediate::Frac(frac) => self.block_frac(frac),
-        }
     }
 
     fn block_scriptfunc(self, sf: &ScriptFunc<'_>) -> Block {
@@ -569,7 +547,7 @@ impl Conf {
     fn block_cell(self, expr: &Expression<'_>) -> Block {
         match self.empty_placeholder(expr) {
             Some(chr) => Block::text(chr),
-            None => self.block_expression(expr),
+            None => self.grid_cell().block_expression(expr),
         }
     }
 
@@ -662,9 +640,18 @@ mod tests {
         render_block_conf(input, Conf::default())
     }
 
+    fn render_block_keeping_spaces(input: &str) -> String {
+        render_block_conf(input, Conf::default().with_keep_spaces(true))
+    }
+
     fn render_block_conf(input: &str, conf: Conf) -> String {
+        // block_expression is the multi-line layout, whatever conf it is handed
+        let conf = Conf {
+            layout: Layout::Block,
+            ..conf
+        };
         let mut out = String::new();
-        let expr = tokens::parse(input);
+        let expr = tokens::parse(input, conf.keep_spaces);
         write!(out, "{}", conf.block_expression(&expr)).unwrap();
         out
     }
@@ -1022,21 +1009,6 @@ mod tests {
     }
 
     #[test]
-    fn a_sign_hugs_after_a_comma_or_a_bare_big_operator() {
-        assert_eq!(render_block("(1,-2)"), "(1,-2)");
-        assert_eq!(render_block("f(x,-y)"), "f(x,-y)");
-        assert_eq!(render_block("[[1,-2],[3,-4]]"), "⎡1  -2⎤\n⎣3  -4⎦");
-        assert_eq!(render_block("sum -x"), "∑-x");
-        assert_eq!(render_block("int -x"), "∫-x");
-        assert_eq!(render_block("prod +x"), "∏+x");
-        // a big operator with scripts is no operator to a sign after it
-        assert_eq!(render_block("sum_(i=1)^n -i"), "∑ᵢ₌₁ⁿ - i");
-        // a sign between two operands still joins them
-        assert_eq!(render_block("1 - - x"), "1 - -x");
-        assert_eq!(render_block("a and -b"), "a and -b");
-    }
-
-    #[test]
     fn matrix_tall_content() {
         // a spacer row separates rows only when a cell spans several lines
         let result = render_block_conf("[[a/b,c],[d,e/f]]", stacked());
@@ -1211,5 +1183,91 @@ mod tests {
             render_block("[[x^(a quad b),c],[d,e]]"),
             "⎡xᵃ\u{2002}ᵇ  c⎤\n⎣  d   e⎦"
         );
+    }
+
+    #[test]
+    fn kept_spaces_do_not_replace_the_usual_spacing() {
+        assert_eq!(render_block_keeping_spaces("a+b"), "a + b");
+        assert_eq!(render_block_keeping_spaces("a  +b"), "a  + b");
+        assert_eq!(render_block_keeping_spaces("x / y   z"), "x\n─   z\ny");
+    }
+
+    #[test]
+    fn spaces_are_dropped_by_default() {
+        assert_eq!(render_block("a  b"), "ab");
+        assert_eq!(render_block("a\tb"), "ab");
+        assert_eq!(render_block("[[a  b,c],[d,e]]"), "⎡ab  c⎤\n⎣ d  e⎦");
+    }
+
+    #[test]
+    fn kept_spaces_are_as_wide_as_typed() {
+        assert_eq!(render_block_keeping_spaces("a  b"), "a  b");
+        assert_eq!(render_block_keeping_spaces("a\tb"), "a b");
+        assert_eq!(render_block_keeping_spaces("a\nb"), "a b");
+        // the one-line rendering of a nested part is placed as one line
+        assert_eq!(
+            render_block_keeping_spaces("sqrt(a\nb)/c"),
+            "√(a b)\n──────\n   c"
+        );
+        assert_eq!(
+            render_block_keeping_spaces("(x^(a\tb))/y"),
+            "xᵃ\u{2009}ᵇ\n────\n  y"
+        );
+    }
+
+    #[test]
+    fn a_kept_space_after_a_unary_sign_is_dropped() {
+        assert_eq!(render_block_keeping_spaces("- x"), "-x");
+        assert_eq!(render_block_keeping_spaces("+ x"), "+x");
+        assert_eq!(render_block_keeping_spaces("+- x"), "±x");
+        assert_eq!(render_block_keeping_spaces("pm x"), "±x");
+        assert_eq!(render_block_keeping_spaces("-+ x"), "∓x");
+        assert_eq!(render_block_keeping_spaces("mp x"), "∓x");
+        assert_eq!(render_block_keeping_spaces("1 + - x"), "1 + -x");
+        assert_eq!(render_block_keeping_spaces("a (- b)"), "a (-b)");
+        assert_eq!(render_block_keeping_spaces("- (a + b)"), "-(a + b)");
+        assert_eq!(render_block_keeping_spaces("- \t x"), "-x");
+        assert_eq!(render_block_keeping_spaces("(- x)/2"), "-x\n──\n 2");
+        assert_eq!(render_block_keeping_spaces("x^(- a)"), "x⁻ᵃ");
+        assert_eq!(render_block_keeping_spaces("x_(- a)"), "x₋ₐ");
+        assert_eq!(
+            render_block_keeping_spaces("[[- a, b], [c, - d]]"),
+            "⎡-a   b⎤\n⎣ c  -d⎦"
+        );
+        // a comma and a big operator without scripts are operators to a sign after them
+        assert_eq!(render_block_keeping_spaces("(1, - 2)"), "(1, -2)");
+        assert_eq!(render_block_keeping_spaces("sum - x"), "∑ -x");
+        // a sign with nothing after it has no operand to hug
+        assert_eq!(render_block_keeping_spaces("-"), "-");
+        assert_eq!(render_block_keeping_spaces("- "), "-");
+    }
+
+    #[test]
+    fn a_kept_space_around_a_binary_sign_stays() {
+        assert_eq!(render_block_keeping_spaces("a - b"), "a - b");
+        assert_eq!(render_block_keeping_spaces("a  -  b"), "a  -  b");
+        assert_eq!(render_block_keeping_spaces("- x + y"), "-x + y");
+        // the second sign follows an operator, so only the space after it goes
+        assert_eq!(render_block_keeping_spaces("a - - b"), "a - -b");
+        // a big operator with scripts is no operator to a sign after it
+        assert_eq!(render_block_keeping_spaces("sum_(i=1)^n - i"), "∑ᵢ₌₁ⁿ - i");
+    }
+
+    #[test]
+    fn kept_spaces_inside_a_grid_are_dropped() {
+        assert_eq!(
+            render_block_keeping_spaces("[[a  b,c],[d  e,f]]"),
+            "⎡ab  c⎤\n⎣de  f⎦"
+        );
+        assert_eq!(
+            render_block_keeping_spaces("[[sqrt(a\nb),c],[d,e]]"),
+            "⎡√(ab)  c⎤\n⎣  d    e⎦"
+        );
+    }
+
+    #[test]
+    fn kept_spaces_outlive_what_renders_to_nothing() {
+        assert_eq!(render_block_keeping_spaces("a  obrace() b"), "a   b");
+        assert_eq!(render_block_keeping_spaces("a  obrace()  b"), "a    b");
     }
 }

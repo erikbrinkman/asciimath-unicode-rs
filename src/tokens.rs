@@ -665,8 +665,12 @@ pub fn mono_map(inp: char) -> char {
     }
 }
 
-pub fn parse(inp: &str) -> Expression<'_> {
-    asciimath_parser::parse_tokens(Tokenizer::with_tokens(inp, &*TOKEN_MAP, true))
+/// Parse `inp`, with the whitespace between items of an expression only if `keep_spaces`
+pub fn parse(inp: &str, keep_spaces: bool) -> Expression<'_> {
+    asciimath_parser::parse_tokens(
+        Tokenizer::with_tokens(inp, &*TOKEN_MAP, true)
+            .filter(|&(_, token)| keep_spaces || token != Token::Space),
+    )
 }
 
 #[cfg(test)]
