@@ -5,7 +5,8 @@ use unicode_width::UnicodeWidthStr;
 
 use super::Conf;
 use super::ast::{
-    func_hugs_argument, hugs_argument, is_spaced_operator, name_without_argument, needs_space,
+    func_hugs_argument, hugs_argument, is_big_operator, is_spaced_operator, name_without_argument,
+    needs_space,
 };
 use super::inline::{Mapper, MapperConf, Operand, column_rules};
 use super::tokens::{left_bracket_str, right_bracket_str, subscript_char, superscript_char};
@@ -352,6 +353,20 @@ fn inter_is_spaced_op(inter: &Intermediate<'_>) -> bool {
     }
 }
 
+/// Whether an item acts as an operator to a sign written after it
+///
+/// A comma and a big operator without scripts separate what they stand between as much as a
+/// spaced operator does, so a sign after one of them applies to the operand after it.
+fn is_operator_to_a_sign(inter: &Intermediate<'_>) -> bool {
+    match inter {
+        Intermediate::ScriptFunc(ScriptFunc::Simple(SimpleScript {
+            simple: Simple::Symbol(sym) | Simple::Operator(sym),
+            script: Script::None,
+        })) => *sym == "," || is_big_operator(sym) || is_spaced_operator(sym),
+        _ => false,
+    }
+}
+
 impl Conf {
     fn block_inline_simple(self, simple: &Simple<'_>) -> Block {
         let mut s = String::new();
@@ -373,16 +388,16 @@ impl Conf {
         let mut prev = first;
         // a sign at the start or right after another operator is unary and hugs its operand
         let mut prev_binary_op = inter_is_spaced_op(first) && !is_sign(first);
-        let mut prev_op = inter_is_spaced_op(first);
+        let mut prev_is_operator = is_operator_to_a_sign(first);
         for (inter, block) in items {
             let is_op = inter_is_spaced_op(inter);
-            let binary_op = is_op && !(prev_op && is_sign(inter));
+            let binary_op = is_op && !(prev_is_operator && is_sign(inter));
             if prev_binary_op || binary_op || needs_space(prev, inter) {
                 result = result.beside(Block::space(1));
             }
             result = result.beside(block);
             prev = inter;
-            prev_op = is_op;
+            prev_is_operator = is_operator_to_a_sign(inter);
             prev_binary_op = binary_op;
         }
         result
@@ -1004,6 +1019,21 @@ mod tests {
         assert_eq!(render_block("a - b"), "a - b");
         assert_eq!(render_block("a and -b"), "a and -b");
         assert_eq!(render_block("x > 0 or x < -1"), "x > 0 or x < -1");
+    }
+
+    #[test]
+    fn a_sign_hugs_after_a_comma_or_a_bare_big_operator() {
+        assert_eq!(render_block("(1,-2)"), "(1,-2)");
+        assert_eq!(render_block("f(x,-y)"), "f(x,-y)");
+        assert_eq!(render_block("[[1,-2],[3,-4]]"), "⎡1  -2⎤\n⎣3  -4⎦");
+        assert_eq!(render_block("sum -x"), "∑-x");
+        assert_eq!(render_block("int -x"), "∫-x");
+        assert_eq!(render_block("prod +x"), "∏+x");
+        // a big operator with scripts is no operator to a sign after it
+        assert_eq!(render_block("sum_(i=1)^n -i"), "∑ᵢ₌₁ⁿ - i");
+        // a sign between two operands still joins them
+        assert_eq!(render_block("1 - - x"), "1 - -x");
+        assert_eq!(render_block("a and -b"), "a and -b");
     }
 
     #[test]
