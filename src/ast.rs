@@ -266,7 +266,7 @@ enum Edge {
     Operand,
 }
 
-fn is_big_operator(sym: &str) -> bool {
+pub fn is_big_operator(sym: &str) -> bool {
     matches!(
         sym,
         "sum"
