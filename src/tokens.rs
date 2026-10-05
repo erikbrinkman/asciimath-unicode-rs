@@ -102,6 +102,21 @@ pub static TOKEN_MAP: LazyLock<HashPrefixMap<Cow<'static, str>, Token>> = LazyLo
         .collect()
 });
 
+/// A space one step narrower, for whitespace that lands in a raised or lowered part
+///
+/// Called only for whitespace, so anything without its own step, a tab or newline among them,
+/// comes out thin.
+fn narrower_space(space: char) -> char {
+    match space {
+        '\u{3000}' => '\u{2003}',
+        '\u{2001}' | '\u{2003}' => '\u{2002}',
+        '\u{2000}' | '\u{2002}' | '\u{2007}' => '\u{2004}',
+        '\u{2004}' => '\u{2005}',
+        '\u{205f}' | '\u{2006}' | '\u{2009}' | '\u{202f}' | '\u{200a}' => '\u{200a}',
+        _ => '\u{2009}',
+    }
+}
+
 pub fn superscript_char(inp: char) -> Option<char> {
     match inp {
         'a' => Some('ᵃ'),
@@ -175,7 +190,7 @@ pub fn superscript_char(inp: char) -> Option<char> {
         'χ' => Some('ᵡ'),
         // already raised, or without a raised form but needed for legibility
         c @ ('′' | ',') => Some(c),
-        c if c.is_whitespace() => Some(c),
+        space if space.is_whitespace() => Some(narrower_space(space)),
         _ => None,
     }
 }
@@ -221,7 +236,7 @@ pub fn subscript_char(inp: char) -> Option<char> {
         'χ' => Some('ᵪ'),
         // no subscript form, but needed to separate indices
         ',' => Some(','),
-        c if c.is_whitespace() => Some(c),
+        space if space.is_whitespace() => Some(narrower_space(space)),
         _ => None,
     }
 }
@@ -785,5 +800,40 @@ mod tests {
         }
         assert!(super::subscript_char(' ').is_some());
         assert!(super::subscript_char('z').is_none());
+    }
+
+    #[test]
+    fn whitespace_steps_narrower_in_a_script() {
+        for (typed, narrower) in [
+            ('\u{3000}', '\u{2003}'),
+            ('\u{2001}', '\u{2002}'),
+            ('\u{2003}', '\u{2002}'),
+            ('\u{2000}', '\u{2004}'),
+            ('\u{2002}', '\u{2004}'),
+            ('\u{2007}', '\u{2004}'),
+            ('\u{2004}', '\u{2005}'),
+            ('\u{0020}', '\u{2009}'),
+            ('\u{00a0}', '\u{2009}'),
+            ('\u{2005}', '\u{2009}'),
+            ('\u{2008}', '\u{2009}'),
+            ('\t', '\u{2009}'),
+            ('\n', '\u{2009}'),
+            ('\u{205f}', '\u{200a}'),
+            ('\u{2006}', '\u{200a}'),
+            ('\u{2009}', '\u{200a}'),
+            ('\u{202f}', '\u{200a}'),
+            ('\u{200a}', '\u{200a}'),
+        ] {
+            assert_eq!(
+                super::superscript_char(typed),
+                Some(narrower),
+                "superscript of {typed:?}"
+            );
+            assert_eq!(
+                super::subscript_char(typed),
+                Some(narrower),
+                "subscript of {typed:?}"
+            );
+        }
     }
 }

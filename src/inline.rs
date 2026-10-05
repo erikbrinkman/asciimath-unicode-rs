@@ -1005,7 +1005,7 @@ mod tests {
         assert_eq!(res, "⅟ₓ");
 
         let res = super::super::parse_unicode("1 / sinx").to_string();
-        assert_eq!(res, "⅟ₛᵢₙ ₓ");
+        assert_eq!(res, "⅟ₛᵢₙ\u{2009}ₓ");
 
         let opts = Conf {
             layout: Layout::InlinePlain,
@@ -1086,13 +1086,13 @@ mod tests {
     #[test]
     fn functions() {
         let res = super::super::parse_unicode("sin x/x").to_string();
-        assert_eq!(res, "ˢⁱⁿ ˣ⁄ₓ");
+        assert_eq!(res, "ˢⁱⁿ\u{2009}ˣ⁄ₓ");
     }
 
     #[test]
     fn script() {
         let res = super::super::parse_unicode("x^sin x").to_string();
-        assert_eq!(res, "xˢⁱⁿ ˣ");
+        assert_eq!(res, "xˢⁱⁿ\u{2009}ˣ");
 
         let res = super::super::parse_unicode("x^vec(x)").to_string();
         assert_eq!(res, "x^x\u{20D7}");
@@ -1916,5 +1916,22 @@ mod tests {
         assert_eq!(render("a qquad b"), "a\u{2003}\u{2003}b");
         // an escaped space stays one plain space
         assert_eq!(render("a \\ b"), "a b");
+    }
+
+    #[test]
+    fn a_space_symbol_in_a_script_steps_narrower() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("x^(a quad b)"), "xᵃ\u{2002}ᵇ");
+        assert_eq!(render("x^(a qquad b)"), "xᵃ\u{2002}\u{2002}ᵇ");
+        assert_eq!(render("x_(i enspace j)"), "xᵢ\u{2004}ⱼ");
+        assert_eq!(render("x_(i thinspace j)"), "xᵢ\u{200a}ⱼ");
+        assert_eq!(render("x^(a \\ b)"), "xᵃ\u{2009}ᵇ");
+
+        let plain = Conf {
+            layout: Layout::InlinePlain,
+            ..Default::default()
+        };
+        assert_eq!(plain.parse("x^(a quad b)").to_string(), "xᵃ\u{2002}ᵇ");
+        assert_eq!(plain.parse("x^(a quad b)/y").to_string(), "xᵃ\u{2002}ᵇ/y");
     }
 }
