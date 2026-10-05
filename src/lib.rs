@@ -140,6 +140,9 @@ pub struct Conf {
     pub placeholders: Option<Placeholders>,
     /// Write the whitespace typed between parts of the math back out
     pub keep_spaces: bool,
+    /// Put a space on either side of an operator that joins two parts of the math, except inside
+    /// a raised or lowered script in the multi-line layout
+    pub spaced_operators: bool,
 }
 
 /// How to lay out the math
@@ -208,6 +211,7 @@ impl Default for Conf {
             layout: Layout::InlineScript,
             placeholders: None,
             keep_spaces: false,
+            spaced_operators: false,
         }
     }
 }
@@ -317,6 +321,48 @@ impl Conf {
     pub fn with_keep_spaces(self, keep_spaces: bool) -> Self {
         Conf {
             keep_spaces,
+            ..self
+        }
+    }
+
+    /// Set whether an operator that joins two parts of the math gets a space on either side
+    ///
+    /// This covers the operators and relations that join two parts, like `+`, `=`, `xx` or `in`;
+    /// with it off they are written against their operands. It says nothing about the spaces that
+    /// keep words and function names legible, as in `sin x` or `a and b`, which are written
+    /// either way. A `+` or `-` that applies to the part after it rather than joining two parts
+    /// is written against that part either way too.
+    ///
+    /// Whitespace typed with [`keep_spaces`][Conf::keep_spaces] on wins where it was typed, and
+    /// where none was typed this decides.
+    ///
+    /// Such a space steps one width narrower when it is raised or lowered, and a fixed-width font
+    /// draws it no narrower than a full cell, so [`Block`][Layout::Block] leaves these spaces out
+    /// inside a raised or lowered script rather than show it as padded as full-size math. The
+    /// spaces a script gets for any other reason are written there either way.
+    ///
+    /// ```
+    /// use asciimath_unicode::{Conf, Layout};
+    /// let conf = Conf::default().with_spaced_operators(true);
+    /// assert_eq!(conf.parse("a+b=c").to_string(), "a + b = c");
+    /// // the second `-` is a sign on `x`, so it keeps no spaces of its own
+    /// assert_eq!(conf.parse("1 - - x").to_string(), "1 - -x");
+    /// // the space `sin` needs is written whatever this says
+    /// assert_eq!(conf.with_spaced_operators(false).parse("sinx+1").to_string(), "sin x+1");
+    /// // a thin space in a script, which the multi-line layout leaves out
+    /// assert_eq!(conf.parse("x^(a+b)").to_string(), "xᵃ\u{2009}⁺\u{2009}ᵇ");
+    /// let block = conf.with_layout(Layout::Block);
+    /// assert_eq!(block.parse("x^(a+b)").to_string(), "xᵃ⁺ᵇ");
+    /// // the space `sin` needs is written there too
+    /// assert_eq!(block.parse("x^sin x").to_string(), "xˢⁱⁿ\u{2009}ˣ");
+    ///
+    /// let kept = conf.with_keep_spaces(true);
+    /// assert_eq!(kept.parse("a  +b").to_string(), "a  + b");
+    /// ```
+    #[must_use]
+    pub fn with_spaced_operators(self, spaced_operators: bool) -> Self {
+        Conf {
+            spaced_operators,
             ..self
         }
     }

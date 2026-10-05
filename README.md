@@ -59,14 +59,15 @@ assert_eq!(res, "x\n─\ny");
 `Conf` starts from `default()`; set fields directly or with the matching
 `with_*` method.
 
-| Field            | Type                   | Default        | Description                                                           |
-|------------------|------------------------|----------------|-----------------------------------------------------------------------|
-| `strip_brackets` |                 `bool` |         `true` | Drop ( ), [ ] and { } around fractions, scripts and command arguments |
-| `vulgar_fracs`   |                 `bool` |         `true` | Render fractions as vulgar fractions (e.g. ½)                         |
-| `skin_tone`      |             `SkinTone` |      `Default` | Default skin tone for emojis                                          |
-| `layout`         |               `Layout` | `InlineScript` | How to lay out the math: `InlineScript`, `InlinePlain`, or `Block`    |
-| `placeholders`   | `Option<Placeholders>` |         `None` | What stands in for the parts that aren't there yet                    |
-| `keep_spaces`    |                 `bool` |        `false` | Write the whitespace typed between parts of the math back out         |
+| Field              | Type                   | Default        | Description                                                           |
+|--------------------|------------------------|----------------|-----------------------------------------------------------------------|
+| `strip_brackets`   |                 `bool` |         `true` | Drop ( ), [ ] and { } around fractions, scripts and command arguments |
+| `vulgar_fracs`     |                 `bool` |         `true` | Render fractions as vulgar fractions (e.g. ½)                         |
+| `skin_tone`        |             `SkinTone` |      `Default` | Default skin tone for emojis                                          |
+| `layout`           |               `Layout` | `InlineScript` | How to lay out the math: `InlineScript`, `InlinePlain`, or `Block`    |
+| `placeholders`     | `Option<Placeholders>` |         `None` | What stands in for the parts that aren't there yet                    |
+| `keep_spaces`      |                 `bool` |        `false` | Write the whitespace typed between parts of the math back out         |
+| `spaced_operators` |                 `bool` |        `false` | Put a space on either side of operators like `+` and `=`              |
 
 `Placeholders` holds the marks themselves: `char` for an argument, fraction part, bracket pair or
 matrix cell with nothing in it, `sub` for a subscript and `sup` for a superscript, defaulting to
@@ -82,3 +83,13 @@ part after it rather than joining two parts is written against that part, so `1 
 writes it as plain spaces as wide as the run printed, since a tab or newline would throw off the
 lines it stacks, and drops what was typed inside a grid.  A space that lands in a script is written
 one step narrower, so `x^(a b)` renders `xᵃ ᵇ` with a thin space rather than a full one.
+
+`spaced_operators` puts a space on either side of an operator that joins two parts of the math,
+like `+`, `=`, `xx` or `in`, so `a+b=c` renders `a + b = c`.  It says nothing about the spaces that
+keep words and function names legible, so `sinx` renders `sin x` either way, and a sign on the part
+after it is still written against that part.  Whitespace typed with `keep_spaces` on wins where it
+was typed, and where none was typed this decides, so `a  +b` renders `a  + b`.  Such a space steps
+one width narrower when it lands in a script, and a fixed-width font draws it no narrower than a
+full cell, so `Block` leaves these spaces out inside a raised or lowered script: `x^(a+b)` renders
+`xᵃ⁺ᵇ` there and `xᵃ ⁺ ᵇ` in a one-line layout.  The spaces a script gets for any other reason are written there
+either way.

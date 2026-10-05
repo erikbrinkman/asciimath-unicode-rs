@@ -10,9 +10,9 @@ use unicode_normalization::char::compose;
 use unicode_width::UnicodeWidthStr;
 
 use super::ast::{
-    extract_vulgar_frac, frac_edges, func_hugs_argument, hugs_argument, is_empty_grouping,
-    is_operator_to_a_sign, is_unary_sign, name_without_argument, needs_space, paren_contents,
-    scriptfunc_edges, unwrap_parens,
+    extract_vulgar_frac, frac_edges, func_hugs_argument, hugs_argument, inter_is_spaced_op,
+    is_empty_grouping, is_operator_to_a_sign, is_unary_sign, name_without_argument, needs_space,
+    paren_contents, scriptfunc_edges, unwrap_parens,
 };
 use super::tokens::{
     bold_map, cal_map, double_map, frak_map, italic_map, left_bracket_str, mono_map,
@@ -892,9 +892,15 @@ impl Conf {
         expr: &Expression<'_>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
+        // a space in a script steps narrower, which a fixed-width font can't draw below a full
+        // cell, so the multi-line layout would show a script's operators as padded as full-size
+        // math
+        let spacing_operators =
+            self.spaced_operators && !(self.layout == Layout::Block && out.conf.sub_sup.is_some());
         let mut prev_edge = None;
         let mut prev_is_operator = None;
         let mut prev_unary_sign = false;
+        let mut prev_spaced_op = false;
         // the runs typed on both sides of an item that renders to nothing both belong in the output
         let mut typed = String::new();
         for inter in expr.iter() {
@@ -926,10 +932,12 @@ impl Conf {
                 continue;
             }
             let unary_sign = is_unary_sign(inter, prev_is_operator);
+            let is_op = inter_is_spaced_op(inter);
+            let spaced_op = spacing_operators && is_op && !unary_sign;
             if let Some(prev_edge) = prev_edge {
                 // a run typed after a unary sign is dropped: the sign hugs its operand
                 if typed.is_empty() || prev_unary_sign {
-                    if needs_space(prev_edge, leading_edge) {
+                    if prev_spaced_op || spaced_op || needs_space(prev_edge, leading_edge) {
                         out.write_char(' ')?;
                     }
                 } else if self.layout == Layout::Block {
@@ -944,6 +952,7 @@ impl Conf {
             prev_edge = Some(trailing_edge);
             prev_is_operator = Some(is_operator_to_a_sign(inter, trailing_edge));
             prev_unary_sign = unary_sign;
+            prev_spaced_op = spaced_op;
             typed.clear();
         }
         Ok(())
@@ -2015,11 +2024,6 @@ mod tests {
         assert_eq!(render("x^(- a)"), "x⁻ᵃ");
         assert_eq!(render("x_(- a)"), "x₋ₐ");
         assert_eq!(render("[[- a, b], [c, - d]]"), "[[-a,b],[c,-d]]");
-        // a comma and a big operator without scripts are operators to a sign after them
-        assert_eq!(render("(1, - 2)"), "(1, -2)");
-        assert_eq!(render("f(x, - y)"), "f(x, -y)");
-        assert_eq!(render("sum - x"), "∑ -x");
-        assert_eq!(render("int - x"), "∫ -x");
         // a sign with nothing after it has no operand to hug
         assert_eq!(render("-"), "-");
         assert_eq!(render("- "), "-");
@@ -2100,5 +2104,158 @@ mod tests {
         assert_eq!(render("a  obrace() b"), "a  □ b");
         assert_eq!(render("obrace() a"), "□ a");
         assert_eq!(render("[[a  b,],[d,e]]"), "[[a  b,□],[d,e]]");
+    }
+
+    #[test]
+    fn operators_join_their_operands_by_default() {
+        let conf = Conf::default();
+        let render = |inp: &str| conf.parse(inp).to_string();
+        assert_eq!(render("a+b"), "a+b");
+        assert_eq!(render("a+b=c"), "a+b=c");
+        assert_eq!(render("x<=y"), "x≤y");
+        assert_eq!(render("a in A"), "a∈A");
+    }
+
+    #[test]
+    fn spaced_operators_get_a_space_on_either_side() {
+        let conf = Conf::default().with_spaced_operators(true);
+        let render = |inp: &str| conf.parse(inp).to_string();
+        assert_eq!(render("a+b"), "a + b");
+        assert_eq!(render("a+b=c"), "a + b = c");
+        assert_eq!(render("x<=y"), "x ≤ y");
+        assert_eq!(render("a in A"), "a ∈ A");
+    }
+
+    #[test]
+    fn a_spaced_sign_still_hugs_its_operand() {
+        let conf = Conf::default().with_spaced_operators(true);
+        let render = |inp: &str| conf.parse(inp).to_string();
+        assert_eq!(render("-x"), "-x");
+        assert_eq!(render("-x+1"), "-x + 1");
+        assert_eq!(render("x = -1"), "x = -1");
+        assert_eq!(render("1 - - x"), "1 - -x");
+    }
+
+    #[test]
+    fn spaced_operators_leave_word_spacing_alone() {
+        let conf = Conf::default().with_spaced_operators(true);
+        let render = |inp: &str| conf.parse(inp).to_string();
+        assert_eq!(render("a and b"), "a and b");
+        assert_eq!(render("a and -b"), "a and -b");
+        assert_eq!(render("x mod y"), "x mod y");
+        assert_eq!(render("sinx+1"), "sin x + 1");
+        assert_eq!(render("x > 0 or x < -1"), "x > 0 or x < -1");
+    }
+
+    #[test]
+    fn a_spaced_operator_in_a_script_steps_narrower() {
+        let conf = Conf::default().with_spaced_operators(true);
+        assert_eq!(Conf::default().parse("x^(a+b)").to_string(), "xᵃ⁺ᵇ");
+        assert_eq!(conf.parse("x^(a+b)").to_string(), "xᵃ\u{2009}⁺\u{2009}ᵇ");
+        assert_eq!(conf.parse("x_(i+1)").to_string(), "xᵢ\u{2009}₊\u{2009}₁");
+        assert_eq!(
+            conf.parse("sum_(i=1)^n i").to_string(),
+            "∑ᵢ\u{2009}₌\u{2009}₁ⁿ i"
+        );
+
+        let plain = conf.with_layout(Layout::InlinePlain);
+        assert_eq!(plain.parse("x^(a+b)").to_string(), "xᵃ\u{2009}⁺\u{2009}ᵇ");
+        assert_eq!(plain.parse("x_(i+1)").to_string(), "xᵢ\u{2009}₊\u{2009}₁");
+
+        let brackets = conf.with_strip_brackets(false);
+        assert_eq!(
+            brackets.parse("x^(a+b)").to_string(),
+            "x⁽ᵃ\u{2009}⁺\u{2009}ᵇ⁾"
+        );
+    }
+
+    #[test]
+    fn a_script_keeps_the_spaces_the_option_did_not_add() {
+        let conf = Conf::default().with_spaced_operators(true);
+        assert_eq!(conf.parse("sin x/x").to_string(), "ˢⁱⁿ\u{2009}ˣ⁄ₓ");
+        assert_eq!(conf.parse("x^sin x").to_string(), "xˢⁱⁿ\u{2009}ˣ");
+        assert_eq!(conf.parse("x^(a quad b)").to_string(), "xᵃ\u{2002}ᵇ");
+
+        let typed = conf.with_keep_spaces(true);
+        assert_eq!(typed.parse("x^(a b)").to_string(), "xᵃ\u{2009}ᵇ");
+        assert_eq!(
+            typed.parse("x^(a  +b)").to_string(),
+            "xᵃ\u{2009}\u{2009}⁺\u{2009}ᵇ"
+        );
+        assert_eq!(
+            typed.parse("x_(i  =1)").to_string(),
+            "xᵢ\u{2009}\u{2009}₌\u{2009}₁"
+        );
+    }
+
+    #[test]
+    fn spaced_operators_inside_a_grid() {
+        let conf = Conf::default().with_spaced_operators(true);
+        assert_eq!(
+            Conf::default().parse("[[a+b,c],[d,e-f]]").to_string(),
+            "[[a+b,c],[d,e-f]]"
+        );
+        assert_eq!(
+            conf.parse("[[a+b,c],[d,e-f]]").to_string(),
+            "[[a + b,c],[d,e - f]]"
+        );
+    }
+
+    #[test]
+    fn spaced_operators_yield_to_what_was_typed() {
+        let conf = Conf::default()
+            .with_keep_spaces(true)
+            .with_spaced_operators(true);
+        let render = |inp: &str| conf.parse(inp).to_string();
+        assert_eq!(render("a+b"), "a + b");
+        assert_eq!(render("a  +b"), "a  + b");
+        assert_eq!(render("a+ b"), "a + b");
+        assert_eq!(render("a  +  b"), "a  +  b");
+        assert_eq!(render("1 + - x"), "1 + -x");
+        assert_eq!(render("- x"), "-x");
+    }
+
+    #[test]
+    fn spaced_operators_with_plain_fractions() {
+        let conf = Conf {
+            layout: Layout::InlinePlain,
+            spaced_operators: true,
+            ..Default::default()
+        };
+        assert_eq!(conf.parse("x/y+z").to_string(), "x/y + z");
+        assert_eq!(conf.parse("1 / 2 + x").to_string(), "½ + x");
+
+        let typed = conf.with_keep_spaces(true);
+        assert_eq!(typed.parse("x/y+z").to_string(), "x/y + z");
+        assert_eq!(typed.parse("x/y  +z").to_string(), "x/y  + z");
+    }
+
+    #[test]
+    fn spaced_operators_around_a_placeholder() {
+        let conf = Conf::default()
+            .with_spaced_operators(true)
+            .with_placeholders(Some(Placeholders::default()));
+        assert_eq!(conf.parse("a+()").to_string(), "a + □");
+        assert_eq!(conf.parse("()+a").to_string(), "□ + a");
+        // the mark has no raised form, so the script is written out at full size
+        assert_eq!(conf.parse("x^(a+())").to_string(), "x^(a + □)");
+    }
+
+    #[test]
+    fn a_spaced_sign_hugs_after_a_comma_or_a_bare_big_operator() {
+        let conf = Conf::default().with_spaced_operators(true);
+        let render = |inp: &str| conf.parse(inp).to_string();
+        assert_eq!(render("(1,-2)"), "(1,-2)");
+        assert_eq!(render("f(x,-y)"), "f(x,-y)");
+        assert_eq!(render("x_(1,-2)"), "x₁,₋₂");
+        assert_eq!(render("sum -x"), "∑-x");
+        assert_eq!(render("int -x"), "∫-x");
+        assert_eq!(render("prod +x"), "∏+x");
+        // a big operator with scripts is no operator to a sign after it
+        assert_eq!(render("sum_(i=1)^n - i"), "∑ᵢ\u{2009}₌\u{2009}₁ⁿ - i");
+
+        let plain = conf.with_layout(Layout::InlinePlain);
+        assert_eq!(plain.parse("(1,-2)").to_string(), "(1,-2)");
+        assert_eq!(plain.parse("sum -x").to_string(), "∑-x");
     }
 }
