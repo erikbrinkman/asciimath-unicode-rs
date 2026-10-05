@@ -1194,4 +1194,22 @@ mod tests {
     fn nothing_to_render_leaves_no_space() {
         assert_eq!(render_block("dx g obrace() dy"), "dx g dy");
     }
+
+    #[test]
+    fn a_space_in_a_script_steps_narrower() {
+        assert_eq!(render_block("x^sin x"), "xˢⁱⁿ\u{2009}ˣ");
+        assert_eq!(render_block("x^(a quad b)"), "xᵃ\u{2002}ᵇ");
+        assert_eq!(render_block("x^(a \\ b)"), "xᵃ\u{2009}ᵇ");
+        assert_eq!(render_block("x^text(a\tb)"), "xᵃ\u{2009}ᵇ");
+        assert_eq!(render_block("x_(i enspace j)"), "xᵢ\u{2004}ⱼ");
+        // a narrower space still takes a whole cell, so the bar spans it
+        assert_eq!(
+            render_block_conf("x^(a quad b)/y", stacked()),
+            "xᵃ\u{2002}ᵇ\n────\n  y"
+        );
+        assert_eq!(
+            render_block("[[x^(a quad b),c],[d,e]]"),
+            "⎡xᵃ\u{2002}ᵇ  c⎤\n⎣  d   e⎦"
+        );
+    }
 }
