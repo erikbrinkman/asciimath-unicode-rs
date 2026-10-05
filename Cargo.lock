@@ -54,9 +54,9 @@ dependencies = [
 
 [[package]]
 name = "asciimath-parser"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26d5e33e850d3ce016ffda5116f0fcff3eb4b0cb0c99ad6849d27b17d9a342d7"
+checksum = "02bb6b85a0ad320ee57f520e605e92231b17d86b2f47d4ee57836064a41cc280"
 dependencies = [
  "rustc-hash",
 ]

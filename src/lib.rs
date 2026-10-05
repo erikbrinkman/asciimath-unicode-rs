@@ -138,6 +138,8 @@ pub struct Conf {
     pub layout: Layout,
     /// What stands in for the parts that aren't there yet, or `None` to show nothing
     pub placeholders: Option<Placeholders>,
+    /// Write the whitespace typed between parts of the math back out
+    pub keep_spaces: bool,
 }
 
 /// How to lay out the math
@@ -205,6 +207,7 @@ impl Default for Conf {
             skin_tone: SkinTone::Default,
             layout: Layout::InlineScript,
             placeholders: None,
+            keep_spaces: false,
         }
     }
 }
@@ -277,9 +280,58 @@ impl Conf {
         }
     }
 
+    /// Set whether the whitespace typed between parts of the math is written back out
+    ///
+    /// Only whitespace between two neighboring parts is kept. Whitespace within one part, like
+    /// around the `/` of a fraction or before a function's argument, is still dropped. Where none
+    /// was typed, the usual spacing still applies, so a space is added wherever one is needed for
+    /// legibility. A `+` or `-` that applies to the part after it rather than joining two parts is
+    /// written against that part, so whitespace typed after such a sign is dropped as well.
+    ///
+    /// How a kept run is written depends on where it lands. A one-line layout writes it as typed,
+    /// tabs and newlines included. [`Block`][Layout::Block] writes it as plain spaces as wide as
+    /// the run printed, since a tab or newline would throw off the lines it stacks, and drops what
+    /// was typed inside a grid. Raised or lowered, every space is written one step narrower, so a
+    /// script with a space in it doesn't read as finished math.
+    ///
+    /// ```
+    /// use asciimath_unicode::{Conf, Layout};
+    /// let conf = Conf::default().with_keep_spaces(true);
+    /// assert_eq!(conf.parse("a + b").to_string(), "a + b");
+    /// assert_eq!(conf.parse("a+b").to_string(), "a+b");
+    /// assert_eq!(conf.parse("1 / 2  x ^ 2").to_string(), "½  x²");
+    /// // the second `-` is a sign on `x`, so what was typed after it goes
+    /// assert_eq!(conf.parse("1 - - x").to_string(), "1 - -x");
+    /// assert_eq!(conf.parse("a\tb").to_string(), "a\tb");
+    /// // nothing was typed, so `sin` still gets the space it needs
+    /// assert_eq!(conf.parse("sinx").to_string(), "sin x");
+    /// // a thin space, where a plain one would look like the end of the script
+    /// assert_eq!(conf.parse("x^(a b)").to_string(), "xᵃ\u{2009}ᵇ");
+    ///
+    /// let block = conf.with_layout(Layout::Block);
+    /// assert_eq!(block.parse("a\tb").to_string(), "a b");
+    /// assert_eq!(block.parse("[[a  b, c], [d, e]]").to_string(), "⎡ab  c⎤\n⎣ d  e⎦");
+    /// assert_eq!(conf.parse("[[a  b, c], [d, e]]").to_string(), "[[a  b,c],[d,e]]");
+    /// ```
+    #[must_use]
+    pub fn with_keep_spaces(self, keep_spaces: bool) -> Self {
+        Conf {
+            keep_spaces,
+            ..self
+        }
+    }
+
     /// Whether one-line fractions may be written as super- and subscripts
     fn script_fracs(self) -> bool {
         self.layout != Layout::InlinePlain
+    }
+
+    /// This conf for the cells of a grid, whose typed whitespace the multi-line layout drops
+    fn grid_cell(self) -> Conf {
+        Conf {
+            keep_spaces: self.keep_spaces && self.layout != Layout::Block,
+            ..self
+        }
     }
 
     /// Parse an asciimath string into an [`Asciimath`] value that implements [`fmt::Display`]
@@ -287,7 +339,7 @@ impl Conf {
     pub fn parse(self, inp: &str) -> Asciimath<'_> {
         Asciimath {
             conf: self,
-            expr: tokens::parse(inp),
+            expr: tokens::parse(inp, self.keep_spaces),
         }
     }
 }

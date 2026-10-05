@@ -67,6 +67,41 @@ fn no_strip_brackets() {
 }
 
 #[test]
+fn keep_spaces() {
+    assert_eq!(run(&[], "a + b"), "a+b\n");
+    assert_eq!(run(&["--keep-spaces"], "a + b"), "a + b\n");
+    assert_eq!(run(&["--keep-spaces"], "x / y   z"), "x/y   z\n");
+    assert_eq!(run(&["--keep-spaces"], "a\tb"), "a\tb\n");
+    assert_eq!(
+        run(
+            &["--keep-spaces", "--layout", "inline-plain"],
+            "1 / 2  x ^ 2"
+        ),
+        "½  x²\n"
+    );
+    assert_eq!(
+        run(&["--keep-spaces", "--no-strip-brackets"], "1/(- x)"),
+        "¹⁄₍₋ₓ₎\n"
+    );
+    assert_eq!(
+        run(&["--keep-spaces", "--placeholders"], "a  obrace() b"),
+        "a  □ b\n"
+    );
+    assert_eq!(
+        run(&["--keep-spaces", "--layout", "block"], "a\tb"),
+        "a b\n"
+    );
+    assert_eq!(
+        run(&["--keep-spaces", "--layout", "block"], "sqrt(a\nb)/c"),
+        "√(a b)\n──────\n   c\n"
+    );
+    assert_eq!(
+        run(&["--keep-spaces", "--layout", "block"], "[[a  b,c],[d,e]]"),
+        "⎡ab  c⎤\n⎣ d  e⎦\n"
+    );
+}
+
+#[test]
 fn placeholders() {
     assert_eq!(run(&[], "x^"), "x\n");
     assert_eq!(run(&["--placeholders"], "x^"), "x⸋\n");

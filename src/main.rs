@@ -82,6 +82,10 @@ struct Args {
     /// What stands in for a missing superscript
     #[arg(long, value_name = "CHAR", requires = "placeholders", default_value_t = Placeholders::default().sup)]
     placeholder_sup: char,
+
+    /// Write the whitespace typed between parts of the math back out
+    #[arg(long)]
+    keep_spaces: bool,
 }
 
 impl From<Args> for Conf {
@@ -91,6 +95,7 @@ impl From<Args> for Conf {
             .with_vulgar_fracs(!inp.no_vulgar_fracs)
             .with_skin_tone(inp.skin_tone.into())
             .with_layout(inp.layout.into())
+            .with_keep_spaces(inp.keep_spaces)
             .with_placeholders(inp.placeholders.then(|| {
                 Placeholders::default()
                     .with_char(inp.placeholder)

@@ -1,7 +1,7 @@
 #![allow(missing_docs, clippy::must_use_candidate)]
 
 use asciimath_parser::tree::{
-    Expression, Func, Group, Intermediate, Script, ScriptFunc, Simple, SimpleScript,
+    Expression, Frac, Func, Group, Intermediate, Script, ScriptFunc, Simple, SimpleScript,
 };
 
 fn vulgar_frac_char(num: &str, den: &str) -> Option<char> {
@@ -251,7 +251,7 @@ pub fn is_spaced_operator(sym: &str) -> bool {
 /// How an item behaves at one of its edges when deciding whether a space separates it from its
 /// neighbor
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Edge {
+pub(crate) enum Edge {
     /// a relation, binary operator, comma, or unscripted big operator; hugs its neighbors inline
     Operator,
     /// a word that reads as its own token, like `mod`, `and`, `dx`, or a function name
@@ -266,7 +266,7 @@ enum Edge {
     Operand,
 }
 
-pub fn is_big_operator(sym: &str) -> bool {
+fn is_big_operator(sym: &str) -> bool {
     matches!(
         sym,
         "sum"
@@ -319,7 +319,7 @@ fn simple_edges(simple: &Simple<'_>, script: &Script<'_>) -> (Edge, Edge) {
     }
 }
 
-fn scriptfunc_edges(func: &ScriptFunc<'_>) -> (Edge, Edge) {
+pub(crate) fn scriptfunc_edges(func: &ScriptFunc<'_>) -> (Edge, Edge) {
     match func {
         ScriptFunc::Simple(SimpleScript { simple, script }) => simple_edges(simple, script),
         // a bare name like the `f` in `def` is just a letter
@@ -338,24 +338,62 @@ fn scriptfunc_edges(func: &ScriptFunc<'_>) -> (Edge, Edge) {
     }
 }
 
-fn edges(inter: &Intermediate<'_>) -> (Edge, Edge) {
-    match inter {
-        Intermediate::ScriptFunc(func) => scriptfunc_edges(func),
-        Intermediate::Frac(frac) => (
-            scriptfunc_edges(&frac.numer).0,
-            scriptfunc_edges(&frac.denom).1,
-        ),
-    }
+/// The outer edges of a fraction, from its numerator and its denominator
+pub(crate) fn frac_edges(frac: &Frac<'_>) -> (Edge, Edge) {
+    (
+        scriptfunc_edges(&frac.numer).0,
+        scriptfunc_edges(&frac.denom).1,
+    )
 }
 
-/// Whether adjacent items of an expression need a space between them so words stay legible
-pub fn needs_space(prev: &Intermediate<'_>, next: &Intermediate<'_>) -> bool {
-    match (edges(prev).1, edges(next).0) {
+/// Whether the edges where two adjacent items of an expression meet need a space between them so
+/// words stay legible
+pub fn needs_space(prev: Edge, next: Edge) -> bool {
+    match (prev, next) {
         (Edge::Operator, _) | (_, Edge::Operator) => false,
         (Edge::Word | Edge::Scripted, _) | (_, Edge::Word) => true,
         (Edge::Applied, next) => next != Edge::Bracket,
         _ => false,
     }
+}
+
+/// Whether an item is a sign that can be written against the operand after it
+fn is_sign(inter: &Intermediate<'_>) -> bool {
+    matches!(
+        inter,
+        Intermediate::ScriptFunc(ScriptFunc::Simple(SimpleScript {
+            simple: Simple::Symbol("+" | "-" | "+-" | "pm" | "-+" | "mp")
+                | Simple::Operator("+" | "-"),
+            script: Script::None,
+        }))
+    )
+}
+
+/// Whether an item is an operator that gets a space on either side of it
+pub(crate) fn inter_is_spaced_op(inter: &Intermediate<'_>) -> bool {
+    match inter {
+        Intermediate::ScriptFunc(ScriptFunc::Simple(SimpleScript {
+            simple: Simple::Symbol(sym) | Simple::Operator(sym),
+            script: Script::None,
+        })) => is_spaced_operator(sym),
+        _ => false,
+    }
+}
+
+/// Whether an item acts as an operator to a sign written after it
+///
+/// A raw `+` or `-` is only in the spaced-operator list, while a comma or an unscripted big
+/// operator is only in the edge table, so both have a say.
+pub(crate) fn is_operator_to_a_sign(inter: &Intermediate<'_>, trailing_edge: Edge) -> bool {
+    inter_is_spaced_op(inter) || trailing_edge == Edge::Operator
+}
+
+/// Whether a sign applies to the operand after it instead of joining two operands
+///
+/// A sign is unary when it starts the expression, which `prev_is_operator` reports as [`None`], or
+/// when the item before it is itself an operator.
+pub(crate) fn is_unary_sign(inter: &Intermediate<'_>, prev_is_operator: Option<bool>) -> bool {
+    is_sign(inter) && prev_is_operator.unwrap_or(true)
 }
 
 /// Whether a function name is written directly against its argument, as in `f(x)` or `f'`
