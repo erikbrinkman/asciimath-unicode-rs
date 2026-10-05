@@ -102,6 +102,34 @@ fn keep_spaces() {
 }
 
 #[test]
+fn spaced_operators() {
+    assert_eq!(run(&[], "a+b=c"), "a+b=c\n");
+    assert_eq!(run(&["--spaced-operators"], "a+b=c"), "a + b = c\n");
+    assert_eq!(run(&["--layout", "block"], "a+b=c"), "a+b=c\n");
+    assert_eq!(
+        run(&["--layout", "block", "--spaced-operators"], "a+b=c"),
+        "a + b = c\n"
+    );
+    assert_eq!(run(&["--spaced-operators"], "1 - - x"), "1 - -x\n");
+    assert_eq!(run(&["--spaced-operators"], "sinx+1"), "sin x + 1\n");
+    assert_eq!(
+        run(&["--spaced-operators", "--keep-spaces"], "a  +b"),
+        "a  + b\n"
+    );
+    assert_eq!(
+        run(&["--spaced-operators"], "sum_(i=1)^n i"),
+        "∑ᵢ\u{2009}₌\u{2009}₁ⁿ i\n"
+    );
+    assert_eq!(
+        run(
+            &["--layout", "block", "--spaced-operators"],
+            "sum_(i=1)^n i"
+        ),
+        "∑ᵢ₌₁ⁿ i\n"
+    );
+}
+
+#[test]
 fn placeholders() {
     assert_eq!(run(&[], "x^"), "x\n");
     assert_eq!(run(&["--placeholders"], "x^"), "x⸋\n");

@@ -86,6 +86,10 @@ struct Args {
     /// Write the whitespace typed between parts of the math back out
     #[arg(long)]
     keep_spaces: bool,
+
+    /// Put spaces around operators like + and =
+    #[arg(long)]
+    spaced_operators: bool,
 }
 
 impl From<Args> for Conf {
@@ -96,6 +100,7 @@ impl From<Args> for Conf {
             .with_skin_tone(inp.skin_tone.into())
             .with_layout(inp.layout.into())
             .with_keep_spaces(inp.keep_spaces)
+            .with_spaced_operators(inp.spaced_operators)
             .with_placeholders(inp.placeholders.then(|| {
                 Placeholders::default()
                     .with_char(inp.placeholder)

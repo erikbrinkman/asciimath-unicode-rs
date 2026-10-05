@@ -368,22 +368,23 @@ impl Conf {
         let mut prev_edge = first_trailing_edge;
         let mut prev_is_operator = is_operator_to_a_sign(first, first_trailing_edge);
         let mut prev_unary_sign = is_unary_sign(first, None);
-        let mut prev_binary_op = inter_is_spaced_op(first) && !prev_unary_sign;
+        let mut prev_spaced_op =
+            self.spaced_operators && inter_is_spaced_op(first) && !prev_unary_sign;
         for (inter, block, (leading_edge, trailing_edge), typed_width) in items {
             let is_op = inter_is_spaced_op(inter);
             let unary_sign = is_unary_sign(inter, Some(prev_is_operator));
-            let binary_op = is_op && !unary_sign;
+            let spaced_op = self.spaced_operators && is_op && !unary_sign;
             // a run typed after a unary sign is dropped: the sign hugs its operand
             if typed_width > 0 && !prev_unary_sign {
                 result = result.beside(Block::space(typed_width));
-            } else if prev_binary_op || binary_op || needs_space(prev_edge, leading_edge) {
+            } else if prev_spaced_op || spaced_op || needs_space(prev_edge, leading_edge) {
                 result = result.beside(Block::space(1));
             }
             result = result.beside(block);
             prev_edge = trailing_edge;
             prev_is_operator = is_operator_to_a_sign(inter, trailing_edge);
             prev_unary_sign = unary_sign;
-            prev_binary_op = binary_op;
+            prev_spaced_op = spaced_op;
         }
         result
     }
@@ -644,6 +645,10 @@ mod tests {
         render_block_conf(input, Conf::default().with_keep_spaces(true))
     }
 
+    fn render_block_spacing_operators(input: &str) -> String {
+        render_block_conf(input, Conf::default().with_spaced_operators(true))
+    }
+
     fn render_block_conf(input: &str, conf: Conf) -> String {
         // block_expression is the multi-line layout, whatever conf it is handed
         let conf = Conf {
@@ -768,7 +773,7 @@ mod tests {
             ..Default::default()
         };
         let result = render_block_conf("(x+1)/y", conf);
-        assert_eq!(result, "x + 1\n─────\n  y");
+        assert_eq!(result, "x+1\n───\n y");
     }
 
     #[test]
@@ -779,7 +784,7 @@ mod tests {
             ..Default::default()
         };
         let result = render_block_conf("x/(y+1)", conf);
-        assert_eq!(result, "  x\n─────\ny + 1");
+        assert_eq!(result, " x\n───\ny+1");
     }
 
     #[test]
@@ -871,7 +876,8 @@ mod tests {
 
     #[test]
     fn frac_plus_term() {
-        assert_eq!(render_block("x/y + z"), "x\n─ + z\ny");
+        assert_eq!(render_block("x/y + z"), "x\n─+z\ny");
+        assert_eq!(render_block_spacing_operators("x/y + z"), "x\n─ + z\ny");
     }
 
     #[test]
@@ -881,8 +887,11 @@ mod tests {
             layout: Layout::Block,
             ..Default::default()
         };
-        let result = render_block_conf("x + y", conf);
-        assert_eq!(result, "x + y");
+        assert_eq!(render_block_conf("x + y", conf), "x+y");
+        assert_eq!(
+            render_block_conf("x + y", conf.with_spaced_operators(true)),
+            "x + y"
+        );
     }
 
     #[test]
@@ -896,7 +905,7 @@ mod tests {
     fn angle_bracket_height() {
         assert_eq!(
             render_block("<< (x + 1) / x_y >>"),
-            "╱x + 1╲\n⎜─────⎟\n⎜  x  ⎟\n╲   y ╱"
+            "╱x+1╲\n⎜───⎟\n⎜ x ⎟\n╲  y╱"
         );
     }
 
@@ -956,9 +965,12 @@ mod tests {
 
     #[test]
     fn spaced_symbol_operator() {
-        // `xx` renders as a spaced `×`, exercising `is_spaced_operator`.
-        let result = render_block_conf("a/b xx c/d", stacked());
-        assert_eq!(result, "a   c\n─ × ─\nb   d");
+        // `xx` renders as a `×`, exercising `is_spaced_operator`.
+        assert_eq!(render_block_conf("a/b xx c/d", stacked()), "a c\n─×─\nb d");
+        assert_eq!(
+            render_block_conf("a/b xx c/d", stacked().with_spaced_operators(true)),
+            "a   c\n─ × ─\nb   d"
+        );
     }
 
     #[test]
@@ -988,7 +1000,7 @@ mod tests {
 
     #[test]
     fn block_prefix_minus_and_text() {
-        assert_eq!(render_block("a !-= -b"), "a ≢ -b");
+        assert_eq!(render_block("a !-= -b"), "a≢-b");
         assert_eq!(render_block("x^-1"), "x⁻¹");
         assert_eq!(render_block("text(hello world)"), "hello world");
     }
@@ -1001,11 +1013,11 @@ mod tests {
 
     #[test]
     fn block_unary_sign() {
-        assert_eq!(render_block("x = -1"), "x = -1");
-        assert_eq!(render_block("-x + 1"), "-x + 1");
-        assert_eq!(render_block("a - b"), "a - b");
+        assert_eq!(render_block("x = -1"), "x=-1");
+        assert_eq!(render_block("-x + 1"), "-x+1");
+        assert_eq!(render_block("a - b"), "a-b");
         assert_eq!(render_block("a and -b"), "a and -b");
-        assert_eq!(render_block("x > 0 or x < -1"), "x > 0 or x < -1");
+        assert_eq!(render_block("x > 0 or x < -1"), "x>0 or x<-1");
     }
 
     #[test]
@@ -1061,6 +1073,7 @@ mod tests {
         // forces evaluation of every preceding operator pattern.
         let conf = Conf {
             layout: Layout::Block,
+            spaced_operators: true,
             ..Default::default()
         };
         assert_eq!(conf.parse("a |-> b").to_string(), "a ↦ b");
@@ -1187,8 +1200,8 @@ mod tests {
 
     #[test]
     fn kept_spaces_do_not_replace_the_usual_spacing() {
-        assert_eq!(render_block_keeping_spaces("a+b"), "a + b");
-        assert_eq!(render_block_keeping_spaces("a  +b"), "a  + b");
+        assert_eq!(render_block_keeping_spaces("a+b"), "a+b");
+        assert_eq!(render_block_keeping_spaces("a  +b"), "a  +b");
         assert_eq!(render_block_keeping_spaces("x / y   z"), "x\n─   z\ny");
     }
 
@@ -1234,9 +1247,6 @@ mod tests {
             render_block_keeping_spaces("[[- a, b], [c, - d]]"),
             "⎡-a   b⎤\n⎣ c  -d⎦"
         );
-        // a comma and a big operator without scripts are operators to a sign after them
-        assert_eq!(render_block_keeping_spaces("(1, - 2)"), "(1, -2)");
-        assert_eq!(render_block_keeping_spaces("sum - x"), "∑ -x");
         // a sign with nothing after it has no operand to hug
         assert_eq!(render_block_keeping_spaces("-"), "-");
         assert_eq!(render_block_keeping_spaces("- "), "-");
@@ -1269,5 +1279,135 @@ mod tests {
     fn kept_spaces_outlive_what_renders_to_nothing() {
         assert_eq!(render_block_keeping_spaces("a  obrace() b"), "a   b");
         assert_eq!(render_block_keeping_spaces("a  obrace()  b"), "a    b");
+    }
+
+    #[test]
+    fn operators_join_their_operands_by_default() {
+        assert_eq!(render_block("a+b"), "a+b");
+        assert_eq!(render_block("a+b=c"), "a+b=c");
+        assert_eq!(render_block("x<=y"), "x≤y");
+        assert_eq!(render_block("a in A"), "a∈A");
+    }
+
+    #[test]
+    fn spaced_operators_get_a_space_on_either_side() {
+        assert_eq!(render_block_spacing_operators("a+b"), "a + b");
+        assert_eq!(render_block_spacing_operators("a+b=c"), "a + b = c");
+        assert_eq!(render_block_spacing_operators("x<=y"), "x ≤ y");
+        assert_eq!(render_block_spacing_operators("a in A"), "a ∈ A");
+    }
+
+    #[test]
+    fn a_spaced_sign_still_hugs_its_operand() {
+        assert_eq!(render_block_spacing_operators("-x"), "-x");
+        assert_eq!(render_block_spacing_operators("-x+1"), "-x + 1");
+        assert_eq!(render_block_spacing_operators("x = -1"), "x = -1");
+        assert_eq!(render_block_spacing_operators("1 - - x"), "1 - -x");
+    }
+
+    #[test]
+    fn spaced_operators_leave_word_spacing_alone() {
+        assert_eq!(render_block_spacing_operators("a and b"), "a and b");
+        assert_eq!(render_block_spacing_operators("a and -b"), "a and -b");
+        assert_eq!(render_block_spacing_operators("x mod y"), "x mod y");
+        assert_eq!(render_block_spacing_operators("sinx+1"), "sin x + 1");
+        assert_eq!(
+            render_block_spacing_operators("x > 0 or x < -1"),
+            "x > 0 or x < -1"
+        );
+    }
+
+    #[test]
+    fn a_spaced_operator_in_a_script_gets_no_space() {
+        assert_eq!(render_block("x^(a+b)"), "xᵃ⁺ᵇ");
+        assert_eq!(render_block("x_(i+1)"), "xᵢ₊₁");
+        assert_eq!(render_block_spacing_operators("x^(a+b)"), "xᵃ⁺ᵇ");
+        assert_eq!(render_block_spacing_operators("x_(i+1)"), "xᵢ₊₁");
+        assert_eq!(render_block_spacing_operators("sum_(i=1)^n i"), "∑ᵢ₌₁ⁿ i");
+        // a script with no raised form is a line of its own at full size, where a space holds up
+        assert_eq!(render_block_spacing_operators("x^(a+Z)"), " a + Z\nx");
+        let brackets = Conf::default()
+            .with_spaced_operators(true)
+            .with_strip_brackets(false);
+        assert_eq!(render_block_conf("x^(a+b)", brackets), "x⁽ᵃ⁺ᵇ⁾");
+    }
+
+    #[test]
+    fn a_script_keeps_the_spaces_the_option_did_not_add() {
+        assert_eq!(render_block_spacing_operators("x^sin x"), "xˢⁱⁿ\u{2009}ˣ");
+        assert_eq!(
+            render_block_spacing_operators("x^(a quad b)"),
+            "xᵃ\u{2002}ᵇ"
+        );
+        assert_eq!(render_block_spacing_operators("x_sin x"), "xₛᵢₙ\u{2009}ₓ");
+        let typed = Conf::default()
+            .with_keep_spaces(true)
+            .with_spaced_operators(true);
+        assert_eq!(render_block_conf("x^(a b)", typed), "xᵃ\u{2009}ᵇ");
+        assert_eq!(
+            render_block_conf("x^(a  +b)", typed),
+            "xᵃ\u{2009}\u{2009}⁺ᵇ"
+        );
+        assert_eq!(
+            render_block_conf("x_(i  =1)", typed),
+            "xᵢ\u{2009}\u{2009}₌₁"
+        );
+    }
+
+    #[test]
+    fn spaced_operators_inside_a_grid() {
+        assert_eq!(render_block("[[a+b,c],[d,e-f]]"), "⎡a+b   c ⎤\n⎣ d   e-f⎦");
+        assert_eq!(
+            render_block_spacing_operators("[[a+b,c],[d,e-f]]"),
+            "⎡a + b    c  ⎤\n⎣  d    e - f⎦"
+        );
+        assert_eq!(
+            render_block_spacing_operators("[(a+b,|,c),(d,|,e-f)]"),
+            "⎡a + b │   c  ⎤\n⎣  d   │ e - f⎦"
+        );
+        // the multi-line layout drops what was typed inside a grid, so this decides there
+        let typed = Conf::default()
+            .with_keep_spaces(true)
+            .with_spaced_operators(true);
+        assert_eq!(
+            render_block_conf("[[a  +b,c],[d,e]]", typed),
+            "⎡a + b  c⎤\n⎣  d    e⎦"
+        );
+    }
+
+    #[test]
+    fn spaced_operators_yield_to_what_was_typed() {
+        let conf = Conf::default()
+            .with_keep_spaces(true)
+            .with_spaced_operators(true);
+        assert_eq!(render_block_conf("a+b", conf), "a + b");
+        assert_eq!(render_block_conf("a  +b", conf), "a  + b");
+        assert_eq!(render_block_conf("a  +  b", conf), "a  +  b");
+        assert_eq!(render_block_conf("1 + - x", conf), "1 + -x");
+    }
+
+    #[test]
+    fn spaced_operators_around_a_placeholder() {
+        let conf = Conf::default()
+            .with_spaced_operators(true)
+            .with_placeholders(Some(Placeholders::default()));
+        assert_eq!(render_block_conf("a+()", conf), "a + □");
+        // the mark has no raised form, so the script becomes a line of its own at full size
+        assert_eq!(render_block_conf("x^(a+())", conf), " a + □\nx");
+    }
+
+    #[test]
+    fn a_spaced_sign_hugs_after_a_comma_or_a_bare_big_operator() {
+        assert_eq!(render_block_spacing_operators("(1,-2)"), "(1,-2)");
+        assert_eq!(render_block_spacing_operators("f(x,-y)"), "f(x,-y)");
+        assert_eq!(render_block_spacing_operators("x_(1,-2)"), "x₁,₋₂");
+        assert_eq!(render_block_spacing_operators("sum -x"), "∑-x");
+        assert_eq!(render_block_spacing_operators("int -x"), "∫-x");
+        assert_eq!(render_block_spacing_operators("prod +x"), "∏+x");
+        // a big operator with scripts is no operator to a sign after it
+        assert_eq!(
+            render_block_spacing_operators("sum_(i=1)^n - i"),
+            "∑ᵢ₌₁ⁿ - i"
+        );
     }
 }
