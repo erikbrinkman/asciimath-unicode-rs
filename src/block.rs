@@ -5,8 +5,8 @@ use unicode_width::UnicodeWidthStr;
 
 use super::Conf;
 use super::ast::{
-    frac_edges, func_hugs_argument, hugs_argument, inter_is_spaced_op, is_operator_to_a_sign,
-    is_unary_sign, name_without_argument, needs_space, scriptfunc_edges,
+    frac_edges, func_hugs_argument, hugs_argument, inter_is_spaced_op, name_without_argument,
+    needs_space, scriptfunc_edges,
 };
 use super::inline::{Mapper, MapperConf, Operand, column_rules};
 use super::tokens::{left_bracket_str, right_bracket_str, subscript_char, superscript_char};
@@ -366,24 +366,16 @@ impl Conf {
         };
         let mut result = first_block;
         let mut prev_edge = first_trailing_edge;
-        let mut prev_is_operator = is_operator_to_a_sign(first, first_trailing_edge);
-        let mut prev_unary_sign = is_unary_sign(first, None);
-        let mut prev_spaced_op =
-            self.spaced_operators && inter_is_spaced_op(first) && !prev_unary_sign;
+        let mut prev_spaced_op = self.spaced_operators && inter_is_spaced_op(first);
         for (inter, block, (leading_edge, trailing_edge), typed_width) in items {
-            let is_op = inter_is_spaced_op(inter);
-            let unary_sign = is_unary_sign(inter, Some(prev_is_operator));
-            let spaced_op = self.spaced_operators && is_op && !unary_sign;
-            // a run typed after a unary sign is dropped: the sign hugs its operand
-            if typed_width > 0 && !prev_unary_sign {
+            let spaced_op = self.spaced_operators && inter_is_spaced_op(inter);
+            if typed_width > 0 {
                 result = result.beside(Block::space(typed_width));
             } else if prev_spaced_op || spaced_op || needs_space(prev_edge, leading_edge) {
                 result = result.beside(Block::space(1));
             }
             result = result.beside(block);
             prev_edge = trailing_edge;
-            prev_is_operator = is_operator_to_a_sign(inter, trailing_edge);
-            prev_unary_sign = unary_sign;
             prev_spaced_op = spaced_op;
         }
         result
@@ -393,6 +385,9 @@ impl Conf {
         match sf {
             ScriptFunc::Simple(ss) => self.block_simplescript(ss),
             ScriptFunc::Func(func) => self.block_func(func),
+            ScriptFunc::Signed(signed) => self
+                .block_inline_simple(&Simple::Sign(signed.sign))
+                .beside(self.block_scriptfunc(signed.operand())),
         }
     }
 
@@ -446,6 +441,9 @@ impl Conf {
                 Simple::Unary(unary) => self.block_unary(unary),
                 Simple::Binary(binary) => self.block_binary(binary),
                 Simple::Func(func) => self.block_simplefunc(func),
+                Simple::Signed(signed) => self
+                    .block_inline_simple(&Simple::Sign(signed.sign))
+                    .beside(self.block_simple(signed.operand())),
                 _ => self.block_inline_simple(simple),
             },
         }
@@ -492,17 +490,30 @@ impl Conf {
         }
     }
 
-    fn block_simplefrac(self, numer: &Simple<'_>, denom: &Simple<'_>) -> Block {
-        // script fractions would stack or not depending on which letters have script forms
-        if self.vulgar_fracs
-            && let Some(frac) = super::ast::extract_vulgar_frac(numer, denom, self.strip_brackets)
-        {
-            Block::text(frac)
+    /// `numer` over `denom` as the one vulgar fraction character, signs included, or `None`
+    /// when [`vulgar_fracs`][crate::Conf::vulgar_fracs] is off
+    ///
+    /// Only that form replaces a stack: the superscript over subscript one would stack or not
+    /// depending on which letters have script forms.
+    fn block_vulgar_frac<'a>(
+        self,
+        numer: &impl Operand<'a>,
+        denom: &impl Operand<'a>,
+    ) -> Option<Block> {
+        if self.vulgar_fracs {
+            self.signed_vulgar_frac(numer, denom).map(Block::text)
         } else {
-            Block::stack_frac(
+            None
+        }
+    }
+
+    fn block_simplefrac(self, numer: &Simple<'_>, denom: &Simple<'_>) -> Block {
+        match self.block_vulgar_frac(numer, denom) {
+            Some(vulgar) => vulgar,
+            None => Block::stack_frac(
                 self.block_simple_stripped(numer),
                 self.block_simple_stripped(denom),
-            )
+            ),
         }
     }
 
@@ -516,15 +527,12 @@ impl Conf {
     }
 
     fn block_frac(self, frac: &Frac<'_>) -> Block {
-        if let Some(num) = frac.numer.as_simple()
-            && let Some(den) = frac.denom.as_simple()
-        {
-            self.block_simplefrac(num, den)
-        } else {
-            Block::stack_frac(
+        match self.block_vulgar_frac(&frac.numer, &frac.denom) {
+            Some(vulgar) => vulgar,
+            None => Block::stack_frac(
                 self.block_scriptfunc_for_frac(&frac.numer),
                 self.block_scriptfunc_for_frac(&frac.denom),
-            )
+            ),
         }
     }
 
@@ -750,6 +758,24 @@ mod tests {
     #[test]
     fn vulgar_frac_passthrough() {
         assert_eq!(render_block("1/2"), "½");
+    }
+
+    #[test]
+    fn signed_vulgar_frac_passthrough() {
+        assert_eq!(render_block("-1/2"), "-½");
+        assert_eq!(render_block("pm 1/2"), "±½");
+        assert_eq!(render_block("- -1/2"), "--½");
+        assert_eq!(render_block("[[1/2,-1],[3,-1/4]]"), "⎡½  -1⎤\n⎣3  -¼⎦");
+        assert_eq!(render_block("x^(-1/2)"), " -½\nx");
+    }
+
+    #[test]
+    fn signed_fracs_stack_with_sign_on_numerator() {
+        assert_eq!(render_block("-3/7"), "-3\n──\n 7");
+        assert_eq!(render_block("-x/y"), "-x\n──\n y");
+        // a sign on the denominator stays where it was typed
+        assert_eq!(render_block("1/-2"), " 1\n──\n-2");
+        assert_eq!(render_block("-1/-2"), "-1\n──\n-2");
     }
 
     #[test]
@@ -1012,7 +1038,13 @@ mod tests {
     }
 
     #[test]
-    fn block_unary_sign() {
+    fn a_sign_stays_against_the_grid_it_prefixes() {
+        assert_eq!(render_block("-[[a,b],[c,d]]"), " ⎡a  b⎤\n-⎣c  d⎦");
+        assert_eq!(render_block("sqrt -[[a,b],[c,d]]"), "  ⎡a  b⎤\n√-⎣c  d⎦");
+    }
+
+    #[test]
+    fn block_signs_and_operators_stay_tight() {
         assert_eq!(render_block("x = -1"), "x=-1");
         assert_eq!(render_block("-x + 1"), "-x+1");
         assert_eq!(render_block("a - b"), "a-b");
@@ -1149,6 +1181,7 @@ mod tests {
         assert_eq!(render_block("dx {: :} dy"), "dx dy");
         assert_eq!(render_block("a mod b"), "a mod b");
         assert_eq!(render_block("a and b"), "a and b");
+        assert_eq!(render_block("dx - dy"), "dx-dy");
         assert_eq!(render_block("int_0^1 f(x) dx"), "∫₀¹ f(x) dx");
     }
 
@@ -1229,7 +1262,7 @@ mod tests {
     }
 
     #[test]
-    fn a_kept_space_after_a_unary_sign_is_dropped() {
+    fn a_kept_space_after_a_prefixing_sign_is_dropped() {
         assert_eq!(render_block_keeping_spaces("- x"), "-x");
         assert_eq!(render_block_keeping_spaces("+ x"), "+x");
         assert_eq!(render_block_keeping_spaces("+- x"), "±x");
@@ -1247,7 +1280,7 @@ mod tests {
             render_block_keeping_spaces("[[- a, b], [c, - d]]"),
             "⎡-a   b⎤\n⎣ c  -d⎦"
         );
-        // a sign with nothing after it has no operand to hug
+        // the sign prefixes an operand that isn't there, and the space before it goes anyway
         assert_eq!(render_block_keeping_spaces("-"), "-");
         assert_eq!(render_block_keeping_spaces("- "), "-");
     }
@@ -1259,8 +1292,8 @@ mod tests {
         assert_eq!(render_block_keeping_spaces("- x + y"), "-x + y");
         // the second sign follows an operator, so only the space after it goes
         assert_eq!(render_block_keeping_spaces("a - - b"), "a - -b");
-        // a big operator with scripts is no operator to a sign after it
-        assert_eq!(render_block_keeping_spaces("sum_(i=1)^n - i"), "∑ᵢ₌₁ⁿ - i");
+        // the scripts don't stand in for the big operator they sit on, so the sign prefixes
+        assert_eq!(render_block_keeping_spaces("sum_(i=1)^n - i"), "∑ᵢ₌₁ⁿ -i");
     }
 
     #[test]
@@ -1303,6 +1336,8 @@ mod tests {
         assert_eq!(render_block_spacing_operators("-x+1"), "-x + 1");
         assert_eq!(render_block_spacing_operators("x = -1"), "x = -1");
         assert_eq!(render_block_spacing_operators("1 - - x"), "1 - -x");
+        // `:=` gets no spaces of its own yet, but the sign after it still hugs
+        assert_eq!(render_block_spacing_operators("a := -b"), "a:=-b");
     }
 
     #[test]
@@ -1404,10 +1439,10 @@ mod tests {
         assert_eq!(render_block_spacing_operators("sum -x"), "∑-x");
         assert_eq!(render_block_spacing_operators("int -x"), "∫-x");
         assert_eq!(render_block_spacing_operators("prod +x"), "∏+x");
-        // a big operator with scripts is no operator to a sign after it
+        // the scripts don't stand in for the big operator they sit on, so the sign prefixes
         assert_eq!(
             render_block_spacing_operators("sum_(i=1)^n - i"),
-            "∑ᵢ₌₁ⁿ - i"
+            "∑ᵢ₌₁ⁿ -i"
         );
     }
 }
