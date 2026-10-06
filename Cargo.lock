@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "asciimath-unicode"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "asciimath-parser",
  "clap",
