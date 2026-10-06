@@ -1,7 +1,7 @@
 #![allow(missing_docs, clippy::must_use_candidate)]
 
 use asciimath_parser::tree::{
-    Expression, Frac, Func, Group, Intermediate, Script, ScriptFunc, Simple, SimpleScript,
+    Expression, Frac, Func, Group, Intermediate, Script, ScriptFunc, Simple, SimpleScript, Symbol,
 };
 
 fn vulgar_frac_char(num: &str, den: &str) -> Option<char> {
@@ -291,10 +291,11 @@ fn is_big_operator(sym: &str) -> bool {
 fn simple_edges(simple: &Simple<'_>, script: &Script<'_>) -> (Edge, Edge) {
     let scripted = !matches!(script, Script::None);
     match *simple {
-        Simple::Symbol("and" | "or" | "if") | Simple::Ident("mod" | "dx" | "dy" | "dz" | "dt") => {
-            (Edge::Word, Edge::Word)
-        }
-        Simple::Symbol(sym) if is_big_operator(sym) => (
+        Simple::Symbol(Symbol {
+            text: "and" | "or" | "if" | "mod" | "dx" | "dy" | "dz" | "dt",
+            ..
+        }) => (Edge::Word, Edge::Word),
+        Simple::Symbol(Symbol { text, .. }) if is_big_operator(text) => (
             Edge::Operand,
             if scripted {
                 Edge::Scripted
@@ -302,10 +303,15 @@ fn simple_edges(simple: &Simple<'_>, script: &Script<'_>) -> (Edge, Edge) {
                 Edge::Operator
             },
         ),
-        Simple::Symbol(sym) if !scripted && (sym == "," || is_spaced_operator(sym)) => {
+        Simple::Symbol(Symbol { text, .. }) | Simple::Sign(text)
+            if !scripted && (text == "," || is_spaced_operator(text)) =>
+        {
             (Edge::Operator, Edge::Operator)
         }
-        Simple::Ident("lim" | "Lim" | "dim" | "min" | "max" | "lub" | "glb") => (
+        Simple::Symbol(Symbol {
+            text: "lim" | "Lim" | "dim" | "min" | "max" | "lub" | "glb",
+            ..
+        }) => (
             Edge::Word,
             if scripted {
                 Edge::Scripted
@@ -322,6 +328,8 @@ fn simple_edges(simple: &Simple<'_>, script: &Script<'_>) -> (Edge, Edge) {
 pub(crate) fn scriptfunc_edges(func: &ScriptFunc<'_>) -> (Edge, Edge) {
     match func {
         ScriptFunc::Simple(SimpleScript { simple, script }) => simple_edges(simple, script),
+        // the sign is written against its operand, so the operand's right edge is the pair's
+        ScriptFunc::Signed(signed) => (Edge::Operand, scriptfunc_edges(signed.operand()).1),
         // a bare name like the `f` in `def` is just a letter
         ScriptFunc::Func(func)
             if matches!(
@@ -357,56 +365,38 @@ pub fn needs_space(prev: Edge, next: Edge) -> bool {
     }
 }
 
-/// Whether an item is a sign that can be written against the operand after it
-fn is_sign(inter: &Intermediate<'_>) -> bool {
-    matches!(
-        inter,
-        Intermediate::ScriptFunc(ScriptFunc::Simple(SimpleScript {
-            simple: Simple::Symbol("+" | "-" | "+-" | "pm" | "-+" | "mp")
-                | Simple::Operator("+" | "-"),
-            script: Script::None,
-        }))
-    )
-}
-
 /// Whether an item is an operator that gets a space on either side of it
+///
+/// A sign joining the operands around it is one; a sign prefixing its operand arrives as a
+/// [`Signed`][asciimath_parser::tree::Signed] operand instead and so never matches.
 pub(crate) fn inter_is_spaced_op(inter: &Intermediate<'_>) -> bool {
     match inter {
         Intermediate::ScriptFunc(ScriptFunc::Simple(SimpleScript {
-            simple: Simple::Symbol(sym) | Simple::Operator(sym),
+            simple:
+                Simple::Symbol(Symbol { text, .. }) | Simple::Sign(text) | Simple::Operator(text),
             script: Script::None,
-        })) => is_spaced_operator(sym),
+        })) => is_spaced_operator(text),
         _ => false,
     }
-}
-
-/// Whether an item acts as an operator to a sign written after it
-///
-/// A raw `+` or `-` is only in the spaced-operator list, while a comma or an unscripted big
-/// operator is only in the edge table, so both have a say.
-pub(crate) fn is_operator_to_a_sign(inter: &Intermediate<'_>, trailing_edge: Edge) -> bool {
-    inter_is_spaced_op(inter) || trailing_edge == Edge::Operator
-}
-
-/// Whether a sign applies to the operand after it instead of joining two operands
-///
-/// A sign is unary when it starts the expression, which `prev_is_operator` reports as [`None`], or
-/// when the item before it is itself an operator.
-pub(crate) fn is_unary_sign(inter: &Intermediate<'_>, prev_is_operator: Option<bool>) -> bool {
-    is_sign(inter) && prev_is_operator.unwrap_or(true)
 }
 
 /// Whether a function name is written directly against its argument, as in `f(x)` or `f'`
 pub fn hugs_argument(arg: &Simple<'_>) -> bool {
     matches!(
         arg,
-        Simple::Missing | Simple::Group(_) | Simple::Matrix(_) | Simple::Symbol("'" | "prime")
+        Simple::Missing
+            | Simple::Group(_)
+            | Simple::Matrix(_)
+            | Simple::Symbol(Symbol {
+                text: "'" | "prime",
+                ..
+            })
     )
 }
 
 pub fn func_hugs_argument(func: &Func<'_>) -> bool {
     match func.arg() {
         ScriptFunc::Simple(SimpleScript { simple, .. }) => hugs_argument(simple),
-        ScriptFunc::Func(_) => false,
+        ScriptFunc::Func(_) | ScriptFunc::Signed(_) => false,
     }
 }

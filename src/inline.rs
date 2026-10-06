@@ -2,7 +2,7 @@
 
 use asciimath_parser::tree::{
     Expression, Func, Group, Intermediate, Matrix, Script, ScriptFunc, Simple, SimpleBinary,
-    SimpleFunc, SimpleScript, SimpleUnary,
+    SimpleFunc, SimpleScript, SimpleUnary, Symbol,
 };
 use std::fmt;
 use std::fmt::Write;
@@ -11,8 +11,8 @@ use unicode_width::UnicodeWidthStr;
 
 use super::ast::{
     extract_vulgar_frac, frac_edges, func_hugs_argument, hugs_argument, inter_is_spaced_op,
-    is_empty_grouping, is_operator_to_a_sign, is_unary_sign, name_without_argument, needs_space,
-    paren_contents, scriptfunc_edges, unwrap_parens,
+    is_empty_grouping, name_without_argument, needs_space, paren_contents, scriptfunc_edges,
+    unwrap_parens,
 };
 use super::tokens::{
     bold_map, cal_map, double_map, frak_map, italic_map, left_bracket_str, mono_map,
@@ -98,6 +98,13 @@ impl<'a, W: fmt::Write + ?Sized> Mapper<'a, W> {
         let mut text = String::new();
         self.onto(&mut text).write_char(chr).ok()?;
         Some(text)
+    }
+
+    /// `text` the way this mapper would write it, if every character of it maps
+    pub fn mapped_str(&self, text: &str) -> Option<String> {
+        let mut mapped = String::new();
+        self.onto(&mut mapped).write_str(text).ok()?;
+        Some(mapped)
     }
 
     pub fn onto<'b, S: Write>(&self, other: &'b mut S) -> Mapper<'b, S> {
@@ -189,15 +196,9 @@ macro_rules! iden {
     };
 }
 
-macro_rules! oper {
-    ($op:pat) => {
-        Simple::Operator($op)
-    };
-}
-
 macro_rules! symb {
     ($sym:pat) => {
-        Simple::Symbol($sym)
+        Simple::Symbol(Symbol { text: $sym, .. })
     };
 }
 
@@ -241,18 +242,13 @@ fn combining_letter(letter: &str) -> Option<char> {
     }
 }
 
-/// Whether `simple` is a prefix minus and its operand, which reads badly after `⅟`
-fn is_negated(simple: &Simple<'_>) -> bool {
-    paren_contents(simple).is_some_and(|expr| {
-        let mut parts = expr
-            .iter()
-            .filter(|inter| !matches!(inter, Intermediate::Space(_)));
-        matches!(
-            parts.next(),
-            Some(Intermediate::ScriptFunc(script_func!(oper!("-"))))
-        ) && parts.next().is_some()
-            && parts.next().is_none()
-    })
+/// Whether `expr` is nothing but a minus prefixing the operand after it
+fn is_negation(expr: &Expression<'_>) -> bool {
+    only(
+        expr.iter()
+            .filter(|inter| !matches!(inter, Intermediate::Space(_))),
+    )
+    .is_some_and(|inter| matches!(inter, Intermediate::ScriptFunc(func) if func.is_negated()))
 }
 
 /// How many vertical lines the matrix draws at a column boundary
@@ -278,6 +274,12 @@ pub(crate) trait Operand<'a> {
     /// The operand as a simple, if it carries no script
     fn as_simple(&self) -> Option<&Simple<'a>>;
 
+    /// Whether the operand is a minus prefixing something, which reads badly after `⅟`
+    fn is_negated(&self) -> bool;
+
+    /// The sign this operand prefixes, and the operand it prefixes it to
+    fn peel_sign(&self) -> Option<(&'a str, &Self)>;
+
     /// Render the operand with its grouping brackets dropped
     fn inline_stripped<W: fmt::Write>(&self, conf: Conf, out: &mut Mapper<'_, W>) -> fmt::Result;
 
@@ -288,6 +290,20 @@ pub(crate) trait Operand<'a> {
 impl<'a> Operand<'a> for Simple<'a> {
     fn as_simple(&self) -> Option<&Simple<'a>> {
         Some(self)
+    }
+
+    fn is_negated(&self) -> bool {
+        match self {
+            Simple::Signed(signed) => signed.sign == "-" && signed.operand().as_option().is_some(),
+            simple => paren_contents(simple).is_some_and(is_negation),
+        }
+    }
+
+    fn peel_sign(&self) -> Option<(&'a str, &Self)> {
+        match self {
+            Simple::Signed(signed) => Some((signed.sign, signed.operand())),
+            _ => None,
+        }
     }
 
     fn inline_stripped<W: fmt::Write>(&self, conf: Conf, out: &mut Mapper<'_, W>) -> fmt::Result {
@@ -303,6 +319,22 @@ impl<'a> Operand<'a> for ScriptFunc<'a> {
     fn as_simple(&self) -> Option<&Simple<'a>> {
         match self {
             script_func!(simple) => Some(simple),
+            _ => None,
+        }
+    }
+
+    fn is_negated(&self) -> bool {
+        match self {
+            ScriptFunc::Signed(signed) => {
+                signed.sign == "-" && !matches!(signed.operand().as_simple(), Some(Simple::Missing))
+            }
+            func => func.as_simple().is_some_and(Operand::is_negated),
+        }
+    }
+
+    fn peel_sign(&self) -> Option<(&'a str, &Self)> {
+        match self {
+            ScriptFunc::Signed(signed) => Some((signed.sign, signed.operand())),
             _ => None,
         }
     }
@@ -696,7 +728,13 @@ impl Conf {
                 &Simple::Number(num) => out.write_str(num),
                 &Simple::Text(text) => out.write_str(text),
                 &Simple::Ident(ident) | &Simple::Operator(ident) => out.write_str(ident),
-                &Simple::Symbol(symbol) => out.write_str(symbol_str(symbol, self.skin_tone)),
+                &Simple::Symbol(Symbol { text, .. }) | &Simple::Sign(text) => {
+                    out.write_str(symbol_str(text, self.skin_tone))
+                }
+                Simple::Signed(signed) => {
+                    out.write_str(symbol_str(signed.sign, self.skin_tone))?;
+                    self.inline_simple(signed.operand(), out)
+                }
                 Simple::Func(func) => self.inline_simplefunc(func, out),
                 Simple::Unary(unary) => self.inline_simpleunary(unary, out),
                 Simple::Binary(binary) => self.inline_simplebinary(binary, out),
@@ -821,6 +859,10 @@ impl Conf {
         match func {
             ScriptFunc::Simple(simple) => self.inline_simplescript(simple, out),
             ScriptFunc::Func(func) => self.inline_func(func, out),
+            ScriptFunc::Signed(signed) => {
+                out.write_str(symbol_str(signed.sign, self.skin_tone))?;
+                self.inline_scriptfunc(signed.operand(), out)
+            }
         }
     }
 
@@ -835,6 +877,34 @@ impl Conf {
         }
     }
 
+    /// `numer` over `denom` as a vulgar fraction character, with any signs prefixing the
+    /// numerator written in front of it
+    ///
+    /// The character has no numerator to carry the sign, so the sign goes before the whole
+    /// fraction. A sign on the denominator stays where it was typed and so never matches.
+    ///
+    /// This does not look at [`vulgar_fracs`][crate::Conf::vulgar_fracs]; every caller checks it
+    /// first.
+    pub(crate) fn signed_vulgar_frac<'a>(
+        self,
+        numer: &impl Operand<'a>,
+        denom: &impl Operand<'a>,
+    ) -> Option<String> {
+        let mut signs = String::new();
+        let mut unsigned = numer;
+        while let Some((sign, operand)) = unsigned.peel_sign() {
+            signs.push_str(symbol_str(sign, self.skin_tone));
+            unsigned = operand;
+        }
+        let frac = extract_vulgar_frac(
+            unsigned.as_simple()?,
+            denom.as_simple()?,
+            self.strip_brackets,
+        )?;
+        signs.push(frac);
+        Some(signs)
+    }
+
     /// `numer` over `denom` as a vulgar fraction, after `⅟`, or as a superscript over a
     /// subscript, when one of those fits
     fn mapped_frac<'a>(
@@ -845,18 +915,16 @@ impl Conf {
     ) -> Option<String> {
         let numer_simple = numer.as_simple();
         if self.vulgar_fracs
-            && let Some(num) = numer_simple
-            && let Some(den) = denom.as_simple()
-            && let Some(frac) = extract_vulgar_frac(num, den, self.strip_brackets)
+            && let Some(frac) = self.signed_vulgar_frac(numer, denom)
         {
-            out.mapped_char(frac)
+            out.mapped_str(&frac)
         } else if self.vulgar_fracs
             && self.script_fracs()
             && matches!(
                 numer_simple.map(|num| self.unwrap_single(num)),
                 Some(num!("1"))
             )
-            && !denom.as_simple().is_some_and(is_negated)
+            && !denom.is_negated()
             && let Some(sub_conf) = out.conf.with_sub()
             && let Some(marker) = out.mapped_char('⅟')
             && let Some(lower) = self.mapped_operand(denom, sub_conf)
@@ -898,8 +966,6 @@ impl Conf {
         let spacing_operators =
             self.spaced_operators && !(self.layout == Layout::Block && out.conf.sub_sup.is_some());
         let mut prev_edge = None;
-        let mut prev_is_operator = None;
-        let mut prev_unary_sign = false;
         let mut prev_spaced_op = false;
         // the runs typed on both sides of an item that renders to nothing both belong in the output
         let mut typed = String::new();
@@ -931,12 +997,9 @@ impl Conf {
             if text.is_empty() {
                 continue;
             }
-            let unary_sign = is_unary_sign(inter, prev_is_operator);
-            let is_op = inter_is_spaced_op(inter);
-            let spaced_op = spacing_operators && is_op && !unary_sign;
+            let spaced_op = spacing_operators && inter_is_spaced_op(inter);
             if let Some(prev_edge) = prev_edge {
-                // a run typed after a unary sign is dropped: the sign hugs its operand
-                if typed.is_empty() || prev_unary_sign {
+                if typed.is_empty() {
                     if prev_spaced_op || spaced_op || needs_space(prev_edge, leading_edge) {
                         out.write_char(' ')?;
                     }
@@ -950,8 +1013,6 @@ impl Conf {
             }
             out.inner.write_str(&text)?;
             prev_edge = Some(trailing_edge);
-            prev_is_operator = Some(is_operator_to_a_sign(inter, trailing_edge));
-            prev_unary_sign = unary_sign;
             prev_spaced_op = spaced_op;
             typed.clear();
         }
@@ -1118,6 +1179,19 @@ mod tests {
         // a multi-char base can't take a combining letter, so it is raised instead
         let res = super::super::parse_unicode("oversetasinx").to_string();
         assert_eq!(res, "sin xᵃ");
+
+        // a sign carries the operand after it, so it stays within the argument it signs
+        let res = super::super::parse_unicode("root -1 2").to_string();
+        assert_eq!(res, "⁻¹√2");
+
+        let res = super::super::parse_unicode("stackrel -1 2").to_string();
+        assert_eq!(res, "2⁻¹");
+
+        let res = super::super::parse_unicode("overset -x y").to_string();
+        assert_eq!(res, "y⁻ˣ");
+
+        let res = super::super::parse_unicode("frac -1 2").to_string();
+        assert_eq!(res, "-½");
     }
 
     #[test]
@@ -1312,6 +1386,53 @@ mod tests {
     }
 
     #[test]
+    fn signed_vulgar_fracs() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("-1/2"), "-½");
+        assert_eq!(render("+1/2"), "+½");
+        assert_eq!(render("pm 1/2"), "±½");
+        assert_eq!(render("mp 1/2"), "∓½");
+        assert_eq!(render("- -1/2"), "--½");
+        assert_eq!(render("-1/2+1/3"), "-½+⅓");
+        assert_eq!(render("[[1/2,-1],[3,-1/4]]"), "[[½,-1],[3,-¼]]");
+        // a fraction with no character form keeps the sign on its numerator
+        assert_eq!(render("-3/7"), "⁻³⁄₇");
+        assert_eq!(render("-x/y"), "-x/y");
+        // a sign on the denominator stays where it was typed
+        assert_eq!(render("1/-2"), "¹⁄₋₂");
+        assert_eq!(render("-1/-2"), "⁻¹⁄₋₂");
+    }
+
+    #[test]
+    fn signed_vulgar_fracs_in_scripts() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("x^(-1/2)"), "x^(-½)");
+        assert_eq!(render("x_(-1/2)"), "x_(-½)");
+    }
+
+    #[test]
+    fn signed_vulgar_fracs_plain() {
+        let opts = Conf {
+            layout: Layout::InlinePlain,
+            ..Default::default()
+        };
+        assert_eq!(opts.parse("-1/2").to_string(), "-½");
+        assert_eq!(opts.parse("pm 1/2").to_string(), "±½");
+        assert_eq!(opts.parse("-3/7").to_string(), "-3/7");
+        assert_eq!(opts.parse("1/-2").to_string(), "1/-2");
+    }
+
+    #[test]
+    fn signed_fracs_without_vulgar() {
+        let opts = Conf {
+            vulgar_fracs: false,
+            ..Default::default()
+        };
+        assert_eq!(opts.parse("-1/2").to_string(), "⁻¹⁄₂");
+        assert_eq!(opts.parse("pm 1/2").to_string(), "±1/2");
+    }
+
+    #[test]
     fn config_no_strip_no_vulgar_no_script() {
         let opts = Conf {
             strip_brackets: false,
@@ -1449,6 +1570,11 @@ mod tests {
         assert_eq!(render("ceil(x)"), "⌈x⌉");
         assert_eq!(render("floor(x)"), "⌊x⌋");
         assert_eq!(render("norm(v)"), "||v||");
+        // the sign and the operand it prefixes are one argument, so both sit inside
+        assert_eq!(render("abs -b"), "|-b|");
+        assert_eq!(render("norm -x"), "||-x||");
+        assert_eq!(render("floor -x"), "⌊-x⌋");
+        assert_eq!(render("ceil -x"), "⌈-x⌉");
         // text/mbox renders its content with no delimiters
         assert_eq!(render("text(hi)"), "hi");
     }
@@ -1668,8 +1794,9 @@ mod tests {
         // an item that renders to nothing leaves no space behind
         assert_eq!(render("dx {: :} dy"), "dx dy");
         assert_eq!(render("dx \"\" dy"), "dx dy");
-        // operators stay tight
+        // operators stay tight, a sign beside a word among them
         assert_eq!(render("x = -1"), "x=-1");
+        assert_eq!(render("dx - dy"), "dx-dy");
         assert_eq!(render("f(x)=x^2"), "f(x)=x²");
         assert_eq!(render("a b"), "ab");
     }
@@ -1698,6 +1825,15 @@ mod tests {
         // a negative denominator is an ordinary fraction, not a reciprocal
         assert_eq!(render("1/-2"), "¹⁄₋₂");
         assert_eq!(render("1/-x"), "¹⁄₋ₓ");
+        assert_eq!(render("frac 1 -2"), "¹⁄₋₂");
+    }
+
+    #[test]
+    fn a_sign_prefixing_a_function_argument() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("sin -x"), "sin -x");
+        assert_eq!(render("f -x"), "f -x");
+        assert_eq!(render("sin^2 -x"), "sin² -x");
     }
 
     #[test]
@@ -2008,7 +2144,7 @@ mod tests {
     }
 
     #[test]
-    fn a_kept_space_after_a_unary_sign_is_dropped() {
+    fn a_kept_space_after_a_prefixing_sign_is_dropped() {
         let conf = Conf::default().with_keep_spaces(true);
         let render = |inp: &str| conf.parse(inp).to_string();
         assert_eq!(render("- x"), "-x");
@@ -2024,7 +2160,7 @@ mod tests {
         assert_eq!(render("x^(- a)"), "x⁻ᵃ");
         assert_eq!(render("x_(- a)"), "x₋ₐ");
         assert_eq!(render("[[- a, b], [c, - d]]"), "[[-a,b],[c,-d]]");
-        // a sign with nothing after it has no operand to hug
+        // the sign prefixes an operand that isn't there, and the space before it goes anyway
         assert_eq!(render("-"), "-");
         assert_eq!(render("- "), "-");
     }
@@ -2039,8 +2175,8 @@ mod tests {
         assert_eq!(render("- x + y"), "-x + y");
         // the second sign follows an operator, so only the space after it goes
         assert_eq!(render("a - - b"), "a - -b");
-        // a big operator with scripts is no operator to a sign after it
-        assert_eq!(render("sum_(i=1)^n - i"), "∑ᵢ₌₁ⁿ - i");
+        // the scripts don't stand in for the big operator they sit on, so the sign prefixes
+        assert_eq!(render("sum_(i=1)^n - i"), "∑ᵢ₌₁ⁿ -i");
     }
 
     #[test]
@@ -2134,6 +2270,8 @@ mod tests {
         assert_eq!(render("-x+1"), "-x + 1");
         assert_eq!(render("x = -1"), "x = -1");
         assert_eq!(render("1 - - x"), "1 - -x");
+        // `:=` gets no spaces of its own yet, but the sign after it still hugs
+        assert_eq!(render("a := -b"), "a:=-b");
     }
 
     #[test]
@@ -2251,8 +2389,8 @@ mod tests {
         assert_eq!(render("sum -x"), "∑-x");
         assert_eq!(render("int -x"), "∫-x");
         assert_eq!(render("prod +x"), "∏+x");
-        // a big operator with scripts is no operator to a sign after it
-        assert_eq!(render("sum_(i=1)^n - i"), "∑ᵢ\u{2009}₌\u{2009}₁ⁿ - i");
+        // the scripts don't stand in for the big operator they sit on, so the sign prefixes
+        assert_eq!(render("sum_(i=1)^n - i"), "∑ᵢ\u{2009}₌\u{2009}₁ⁿ -i");
 
         let plain = conf.with_layout(Layout::InlinePlain);
         assert_eq!(plain.parse("(1,-2)").to_string(), "(1,-2)");

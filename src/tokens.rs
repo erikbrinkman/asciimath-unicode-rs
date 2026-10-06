@@ -3,101 +3,121 @@
 use super::SkinTone;
 use asciimath_parser::prefix_map::HashPrefixMap;
 use asciimath_parser::tree::Expression;
-use asciimath_parser::{Token, Tokenizer};
+use asciimath_parser::{SymbolClass, Token, Tokenizer};
 use std::borrow::Cow;
 use std::sync::LazyLock;
 
 macro_rules! tokens {
-    ($($type:ident => $($str:expr),+;)+) => {
+    ($($token:expr => $($str:expr),+;)+) => {
         [
             $(
                 $(
-                    ($str, Token::$type),
+                    ($str, $token),
                 )+
             )+
         ]
     };
 }
 
-const UNICODE_TOKENS: [(&str, Token); 425] = tokens!(
-    Frac => "/";
-    Super => "^";
-    Sub => "_";
-    Sep => ",";
-    Function => "sin", "cos", "tan", "sinh", "cosh", "tanh", "cot", "sec", "csc", "arcsin",
-        "arccos", "arctan", "coth", "sech", "csch", "exp", "log", "ln", "det", "gcd", "lcm", "Sin",
-        "Cos", "Tan", "Arcsin", "Arccos", "Arctan", "Sinh", "Cosh", "Tanh", "Cot", "Sec", "Csc",
-        "Log", "Ln", "f", "g", "arcsec", "arccsc", "arccot";
-    Unary => "sqrt", "abs", "norm", "floor", "ceil", "Abs", "hat", "bar", "overline", "vec", "dot",
-        "ddot", "overarc", "overparen", "ul", "underline", "ubrace", "underbrace", "obrace",
-        "overbrace", "text", "mbox", "cancel", "tilde";
-    // font commands
-    Unary => "bb", "mathbf", "sf", "mathsf", "bbb", "mathbb", "cc", "mathcal", "tt", "mathtt",
-        "fr", "mathfrak", "it", "mathit", "italic", "bold", "bbit", "bbsf", "sfit", "bbsfit", "bbcc",
-        "bbfr";
-    Binary => "frac", "root", "stackrel", "overset", "underset", "color", "id", "class";
-    // greek symbols
-    Symbol => "alpha", "Alpha", "beta", "Beta", "chi", "Chi", "delta", "Delta", "epsi", "Epsi",
-        "epsilon", "Epsilon", "varepsilon", "eta", "Eta", "gamma", "Gamma", "iota", "Iota",
-        "kappa", "Kappa","varkappa", "lambda", "Lambda", "lamda", "Lamda", "mu", "Mu", "nu", "Nu",
-        "omega", "Omega", "phi", "varphi", "Phi", "pi", "Pi", "varpi", "psi", "Psi", "rho", "Rho",
-        "varrho", "sigma", "Sigma", "tau", "Tau", "theta", "vartheta", "Theta","Vartheta",
-        "upsilon", "Upsilon", "xi", "Xi", "zeta", "Zeta";
-    // operations
-    Symbol => "*", "cdot", "**", "ast", "***", "star", "//", "\\\\", "backslash", "setminus", "xx",
-        "times", "|><", "ltimes", "><|", "rtimes", "|><|", "bowtie", "-:", "div", "divide", "@",
-        "circ", "o+", "oplus", "ox", "otimes", "o.", "odot", "sum", "prod", "^^", "wedge", "land",
-        "^^^", "bigwedge", "vv", "vee", "lor", "vvv", "bigvee", "nn", "cap", "nnn", "bigcap", "uu",
-        "cup", "uuu", "bigcup", "ominus", "o-", "oslash", "dag", "dagger", "ddag", "ddagger";
-    // relations
-    Symbol => "=", "!=", "ne", "<", "lt", "<=", "le", "lt=", "leq", ">", "gt", "mlt", "ll", ">=", "ge",
-        "gt=", "geq", "mgt", "gg", "-<", "prec", "-lt", ">-", "succ", "-<=", "preceq", ">-=",
-        "succeq", "in", "!in", "notin", "sub", "subset", "sup", "supset", "sube", "subseteq",
-        "supe", "supseteq",
-        "!sub", "nsub", "notsubset", "!sup", "nsup", "notsupset", "!sube", "nsubseteq",
-        "notsubseteq", "!supe", "nsupseteq", "notsupseteq",
-        "-=", "equiv", "!-=", "notequiv", "~=", "cong", "~~", "approx", "~", "sim",
-        "prop", "propto";
-    // logical
-    Symbol => "not", "neg", "=>", "implies", "<=>", "iff", "AA", "forall", "EE", "exists", "!EE",
-        "notexists", "_|_", "bot", "TT", "top", "|--", "vdash", "|==", "models";
-    Symbol => "and", "or", "if";
-    // misc
-    Symbol => ":|:", "int", "oint", "iint", "iiint", "oiint", "oiiint",
-        "del", "partial", "grad", "nabla", "+-", "pm", "-+", "mp",
-        "O/", "emptyset", "oo", "infty", "aleph", "...", "ldots", ":.", "therefore", ":'",
-        "because", "/_", "angle", "/_\\", "triangle", "'", "prime", "\\ ", "frown",
-        "quad", "qquad", "cdots", "vdots", "ddots", "diamond", "square", "CC", "NN", "QQ", "RR",
-        "ZZ", "ell", "hbar", "enspace", "thinspace";
-    // arrows
-    Symbol => "uarr", "uparrow", "uArr", "Uparrow", "darr", "downarrow", "dArr", "Downarrow",
-        "rarr", "rightarrow", "->", "to", ">->",
-        "rightarrowtail", "->>", "twoheadrightarrow", ">->>", "twoheadrightarrowtail", "|->",
-        "mapsto", "larr", "leftarrow", "<-", "harr", "leftrightarrow", "<->", "rArr", "Rightarrow",
-        "==>", "lArr", "Leftarrow","<==",  "hArr", "Leftrightarrow", "<==>", "rightleftharpoons";
-    // brackets
-    OpenBracket => "(", "[", "{", "|:", "(:", "<<", "langle", "left(", "left[", "{:", "|__",
-        "lfloor", "|~", "lceiling";
-    // right solution
-    CloseBracket => ")", "]", "}", ":|", ":)", ">>", "rangle", "right)", "right]", ":}",
-        "__|", "rfloor", "~|", "rceiling";
-    OpenCloseBracket => "|";
-    // defined identifiers
-    Ident => "dx", "dy", "dz", "dt";
-    // underover
-    Ident => "lim", "Lim", "dim", "mod", "lub", "glb", "min", "max";
-    // Misc
-    Ident => ":=";
-);
+const UNICODE_TOKENS: [(&str, Token); 430] = {
+    use SymbolClass::{Glyph, Joining, JoiningName, Leading, LeadingName, Name, Space};
+    use Token::{
+        Binary, CloseBracket, Frac, Function, OpenBracket, OpenCloseBracket, Sep, Sign, Sub, Super,
+        Symbol, Unary,
+    };
+
+    tokens!(
+        Frac => "/";
+        Super => "^";
+        Sub => "_";
+        Sep => ",";
+        Sign => "+", "-", "+-", "pm", "-+", "mp";
+        Function => "sin", "cos", "tan", "sinh", "cosh", "tanh", "cot", "sec", "csc", "arcsin",
+            "arccos", "arctan", "coth", "sech", "csch", "exp", "log", "ln", "det", "gcd", "lcm",
+            "Sin", "Cos", "Tan", "Arcsin", "Arccos", "Arctan", "Sinh", "Cosh", "Tanh", "Cot",
+            "Sec", "Csc", "Log", "Ln", "f", "g", "arcsec", "arccsc", "arccot";
+        Unary => "sqrt", "abs", "norm", "floor", "ceil", "Abs", "hat", "bar", "overline", "vec",
+            "dot", "ddot", "overarc", "overparen", "ul", "underline", "ubrace", "underbrace",
+            "obrace", "overbrace", "text", "mbox", "cancel", "tilde";
+        // font commands
+        Unary => "bb", "mathbf", "sf", "mathsf", "bbb", "mathbb", "cc", "mathcal", "tt", "mathtt",
+            "fr", "mathfrak", "it", "mathit", "italic", "bold", "bbit", "bbsf", "sfit", "bbsfit",
+            "bbcc", "bbfr";
+        Binary => "frac", "root", "stackrel", "overset", "underset", "color", "id", "class";
+        // greek symbols
+        Symbol(Glyph) => "alpha", "Alpha", "beta", "Beta", "chi", "Chi", "delta", "Delta", "epsi",
+            "Epsi", "epsilon", "Epsilon", "varepsilon", "eta", "Eta", "gamma", "Gamma", "iota",
+            "Iota", "kappa", "Kappa","varkappa", "lambda", "Lambda", "lamda", "Lamda", "mu", "Mu",
+            "nu", "Nu", "omega", "Omega", "phi", "varphi", "Phi", "pi", "Pi", "varpi", "psi",
+            "Psi", "rho", "Rho", "varrho", "sigma", "Sigma", "tau", "Tau", "theta", "vartheta",
+            "Theta","Vartheta", "upsilon", "Upsilon", "xi", "Xi", "zeta", "Zeta";
+        // operations
+        Symbol(Joining) => "*", "cdot", "**", "ast", "***", "star", "//", "\\\\", "backslash",
+            "setminus", "xx", "times", "|><", "ltimes", "><|", "rtimes", "|><|", "bowtie", "-:",
+            "div", "divide", "@", "circ", "o+", "oplus", "ox", "otimes", "o.", "odot", "^^",
+            "wedge", "land", "vv", "vee", "lor", "nn", "cap", "uu", "cup", "ominus", "o-",
+            "oslash", "dag", "dagger", "ddag", "ddagger";
+        // big operations, which want the operand after them
+        Symbol(Leading) => "sum", "prod", "^^^", "bigwedge", "vvv", "bigvee", "nnn", "bigcap",
+            "uuu", "bigcup";
+        // relations
+        Symbol(Joining) => "=", "!=", "ne", ":=", "<", "lt", "<=", "le", "lt=", "leq", ">", "gt",
+            "mlt", "ll", ">=", "ge", "gt=", "geq", "mgt", "gg", "-<", "prec", "-lt", ">-", "succ",
+            "-<=", "preceq", ">-=", "succeq", "in", "!in", "notin", "sub", "subset", "sup",
+            "supset", "sube", "subseteq", "supe", "supseteq",
+            "!sub", "nsub", "notsubset", "!sup", "nsup", "notsupset", "!sube", "nsubseteq",
+            "notsubseteq", "!supe", "nsupseteq", "notsupseteq",
+            "-=", "equiv", "!-=", "notequiv", "~=", "cong", "~~", "approx", "~", "sim",
+            "prop", "propto";
+        // logical
+        Symbol(Joining) => "=>", "implies", "<=>", "iff", "|--", "vdash", "|==", "models";
+        // negation and the quantifiers, which want the operand after them
+        Symbol(Leading) => "not", "neg", "AA", "forall", "EE", "exists", "!EE", "notexists";
+        Symbol(Glyph) => "_|_", "bot", "TT", "top";
+        Symbol(JoiningName) => "and", "or", "if";
+        // misc
+        Symbol(Joining) => ":|:", ":.", "therefore", ":'", "because", "diamond", "frown";
+        Symbol(Leading) => "int", "oint", "iint", "iiint", "oiint", "oiiint";
+        Symbol(Space) => "\\ ", "quad", "qquad", "enspace", "thinspace";
+        // not asciimath symbols, but each completes the operand before it, so a sign after joins
+        Symbol(Glyph) => "!", "%";
+        Symbol(Glyph) => "del", "partial", "grad", "nabla",
+            "O/", "emptyset", "oo", "infty", "aleph", "...", "ldots",
+            "/_", "angle", "/_\\", "triangle", "'", "prime",
+            "cdots", "vdots", "ddots", "square", "CC", "NN", "QQ", "RR", "ZZ", "ell", "hbar";
+        // arrows
+        Symbol(Joining) => "uarr", "uparrow", "uArr", "Uparrow", "darr", "downarrow", "dArr",
+            "Downarrow", "rarr", "rightarrow", "->", "to", ">->",
+            "rightarrowtail", "->>", "twoheadrightarrow", ">->>", "twoheadrightarrowtail", "|->",
+            "mapsto", "larr", "leftarrow", "<-", "harr", "leftrightarrow", "<->", "rArr",
+            "Rightarrow", "==>", "lArr", "Leftarrow","<==",  "hArr", "Leftrightarrow", "<==>",
+            "rightleftharpoons";
+        // brackets
+        OpenBracket => "(", "[", "{", "|:", "(:", "<<", "langle", "left(", "left[", "{:", "|__",
+            "lfloor", "|~", "lceiling";
+        // right solution
+        CloseBracket => ")", "]", "}", ":|", ":)", ">>", "rangle", "right)", "right]", ":}",
+            "__|", "rfloor", "~|", "rceiling";
+        OpenCloseBracket => "|", "||";
+        // defined names
+        Symbol(Name) => "dx", "dy", "dz", "dt";
+        // underover
+        Symbol(LeadingName) => "lim", "Lim", "dim", "lub", "glb", "min", "max";
+        Symbol(JoiningName) => "mod";
+    )
+};
 
 pub static TOKEN_MAP: LazyLock<HashPrefixMap<Cow<'static, str>, Token>> = LazyLock::new(|| {
     UNICODE_TOKENS
         .into_iter()
         .map(|(name, tok)| (Cow::Borrowed(name), tok))
         .chain(emojis::iter().flat_map(|emoji| {
-            emoji
-                .shortcodes()
-                .map(|code| (Cow::Owned(format!(":{code}:")), Token::Symbol))
+            emoji.shortcodes().map(|code| {
+                (
+                    Cow::Owned(format!(":{code}:")),
+                    Token::Symbol(SymbolClass::Glyph),
+                )
+            })
         }))
         .collect()
 });
@@ -450,6 +470,7 @@ pub fn left_bracket_str(inp: &str) -> &str {
         "|__" | "lfloor" => "⌊",
         "|~" | "lceiling" => "⌈",
         "|:" | "|" => "|",
+        "||" => "||",
         _ => unreachable!("matches all valid left bracket strs"),
     }
 }
@@ -464,6 +485,7 @@ pub fn right_bracket_str(inp: &str) -> &str {
         "__|" | "rfloor" => "⌋",
         "~|" | "rceiling" => "⌉",
         ":|" | "|" => "|",
+        "||" => "||",
         _ => unreachable!("matches all valid right bracket strs"),
     }
 }
@@ -676,13 +698,14 @@ pub fn parse(inp: &str, keep_spaces: bool) -> Expression<'_> {
 #[cfg(test)]
 mod tests {
     use super::{SkinTone, Token, UNICODE_TOKENS};
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn mapping() {
         // the tokens whose unicode form is the token itself
-        const WRITTEN_AS_TYPED: [&str; 17] = [
-            "/", "^", "_", ",", "=", "<", ">", "and", "or", "if", "(", "[", "{", ")", "]", "}", "|",
+        const WRITTEN_AS_TYPED: [&str; 20] = [
+            "/", "^", "_", ",", "+", "-", "=", ":=", "<", ">", "!", "%", "(", "[", "{", ")", "]",
+            "}", "|", "||",
         ];
         for (string, tok) in UNICODE_TOKENS {
             let mapped = match tok {
@@ -696,15 +719,45 @@ mod tests {
                     );
                     super::symbol_str(string, SkinTone::Default)
                 }
-                Token::Symbol | Token::Frac | Token::Super | Token::Sub | Token::Sep => {
-                    super::symbol_str(string, SkinTone::Default)
+                Token::Symbol(class) if class.is_name() => {
+                    assert_eq!(
+                        super::symbol_str(string, SkinTone::Default),
+                        string,
+                        "{string:?} is written as letters but renders as something else"
+                    );
+                    continue;
                 }
+                Token::Symbol(_)
+                | Token::Sign
+                | Token::Frac
+                | Token::Super
+                | Token::Sub
+                | Token::Sep => super::symbol_str(string, SkinTone::Default),
                 _ => continue,
             };
             assert!(
                 mapped != string || WRITTEN_AS_TYPED.contains(&string),
                 "{string:?} has no unicode form"
             );
+        }
+    }
+
+    #[test]
+    fn classes_agree_with_the_parser() {
+        // the symbols classed differently here on purpose, each with the reason why
+        const DELIBERATE: [(&str, &str); 0] = [];
+
+        let parsed: HashMap<&str, Token> = asciimath_parser::ASCIIMATH_TOKENS.into_iter().collect();
+        for (string, tok) in UNICODE_TOKENS {
+            // a symbol only this crate knows has nothing to agree with
+            if let Some(&other) = parsed.get(string)
+                && !DELIBERATE.iter().any(|&(name, _)| name == string)
+            {
+                assert_eq!(
+                    tok, other,
+                    "{string:?} is {tok:?} here and {other:?} in the parser"
+                );
+            }
         }
     }
 
