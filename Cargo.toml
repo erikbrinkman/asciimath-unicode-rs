@@ -16,7 +16,7 @@ name = "asciimath-unicode"
 required-features = ["binary"]
 
 [features]
-binary = ["clap"]
+binary = ["dep:clap"]
 
 [dependencies]
 asciimath-parser = "0.5"

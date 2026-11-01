@@ -455,9 +455,37 @@ pub fn symbol_str(inp: &str, skin_tone: SkinTone) -> &str {
             .map_or(other, |emoji| {
                 emoji
                     .with_skin_tone(skin_tone.into())
+                    .or_else(|| emoji.with_skin_tone(first_tone(skin_tone).into()))
                     .unwrap_or(emoji)
                     .as_str()
             }),
+    }
+}
+
+/// The tone of the first person of a two-person tone, for an emoji of one person
+fn first_tone(skin_tone: SkinTone) -> SkinTone {
+    match skin_tone {
+        SkinTone::LightAndMediumLight
+        | SkinTone::LightAndMedium
+        | SkinTone::LightAndMediumDark
+        | SkinTone::LightAndDark => SkinTone::Light,
+        SkinTone::MediumLightAndLight
+        | SkinTone::MediumLightAndMedium
+        | SkinTone::MediumLightAndMediumDark
+        | SkinTone::MediumLightAndDark => SkinTone::MediumLight,
+        SkinTone::MediumAndLight
+        | SkinTone::MediumAndMediumLight
+        | SkinTone::MediumAndMediumDark
+        | SkinTone::MediumAndDark => SkinTone::Medium,
+        SkinTone::MediumDarkAndLight
+        | SkinTone::MediumDarkAndMediumLight
+        | SkinTone::MediumDarkAndMedium
+        | SkinTone::MediumDarkAndDark => SkinTone::MediumDark,
+        SkinTone::DarkAndLight
+        | SkinTone::DarkAndMediumLight
+        | SkinTone::DarkAndMedium
+        | SkinTone::DarkAndMediumDark => SkinTone::Dark,
+        single => single,
     }
 }
 

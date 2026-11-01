@@ -208,6 +208,35 @@ fn skin_tone() {
 }
 
 #[test]
+fn only_long_help_lists_every_skin_tone() {
+    let short = run(&["-h"], "");
+    assert!(short.contains("two different ones joined by -and-"));
+    assert!(!short.contains("dark-and-medium-dark"));
+    assert!(run(&["--help"], "").contains("dark-and-medium-dark"));
+}
+
+#[test]
+fn paired_skin_tones() {
+    assert_eq!(
+        run(&["--skin-tone", "light-and-dark"], ":couple_with_heart:"),
+        "🧑🏻\u{200d}❤\u{fe0f}\u{200d}🧑🏿\n"
+    );
+    assert_eq!(
+        run(
+            &["--skin-tone", "dark-and-medium-dark"],
+            ":couple_with_heart:"
+        ),
+        "🧑🏿\u{200d}❤\u{fe0f}\u{200d}🧑🏾\n"
+    );
+    // an emoji of one person takes the first tone
+    assert_eq!(
+        run(&["--skin-tone", "light-and-dark"], ":thumbsup:"),
+        "👍🏻\n"
+    );
+    assert_eq!(run(&["--skin-tone", "dark-and-light"], ":hand:"), "✋🏿\n");
+}
+
+#[test]
 fn non_utf8_input_fails_cleanly() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_asciimath-unicode"))
         .stdin(Stdio::piped())
@@ -223,8 +252,8 @@ fn non_utf8_input_fails_cleanly() {
         .expect("failed to write stdin");
     let output = child.wait_with_output().expect("failed to wait on binary");
     assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
+    assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8(output.stderr).expect("stderr was not utf-8");
-    assert!(!stderr.is_empty());
+    assert_ne!(stderr, "");
     assert!(!stderr.contains("panicked"), "binary panicked: {stderr}");
 }
