@@ -11,9 +11,9 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::ast::{
-    extract_vulgar_frac, frac_edges, func_hugs_argument, hugs_argument, inter_is_spaced_op,
-    is_empty_grouping, name_without_argument, needs_space, paren_contents, scriptfunc_edges,
-    unwrap_parens,
+    delimiters, extract_vulgar_frac, frac_edges, func_hugs_argument, hugs_argument,
+    inter_is_spaced_op, is_empty_grouping, name_without_argument, needs_space, paren_contents,
+    scriptfunc_edges, unwrap_parens,
 };
 use super::tokens::{
     bold_map, cal_map, double_map, frak_map, is_bracket_char, italic_map, left_bracket_str,
@@ -71,7 +71,7 @@ pub struct Font([Option<Style>; 7]);
 impl Font {
     /// This font inside the font of `styles`, which are given outermost first; a style applied
     /// again changes nothing, so one already here is left out
-    fn within(self, styles: &[Style]) -> Self {
+    pub fn within(self, styles: &[Style]) -> Self {
         let Font(mut slots) = self;
         for &style in styles {
             if !slots.contains(&Some(style))
@@ -390,7 +390,32 @@ pub(crate) fn column_rules(matrix: &Matrix<'_>, boundary: usize) -> usize {
         .count()
 }
 
-fn root_char(index: &Simple<'_>) -> Option<char> {
+/// The styles of the font command `op`, outermost first, if it is one
+pub(crate) fn font_styles(op: &str) -> Option<&'static [Style]> {
+    match op {
+        "bb" | "mathbf" | "bold" => Some(&[Style::Bold]),
+        "bbb" | "mathbb" => Some(&[Style::Double]),
+        "cc" | "mathcal" => Some(&[Style::Cal]),
+        "tt" | "mathtt" => Some(&[Style::Mono]),
+        "fr" | "mathfrak" => Some(&[Style::Frak]),
+        "sf" | "mathsf" => Some(&[Style::Sans]),
+        "it" | "mathit" | "italic" => Some(&[Style::Italic]),
+        "bbit" => Some(&[Style::Bold, Style::Italic]),
+        "bbsf" => Some(&[Style::Bold, Style::Sans]),
+        "sfit" => Some(&[Style::Italic, Style::Sans]),
+        "bbsfit" => Some(&[Style::Bold, Style::Italic, Style::Sans]),
+        "bbcc" => Some(&[Style::Bold, Style::Cal]),
+        "bbfr" => Some(&[Style::Bold, Style::Frak]),
+        _ => None,
+    }
+}
+
+/// Whether `op` puts a brace over or under its argument, whose labels arrive as scripts
+pub(crate) fn is_brace(op: &str) -> bool {
+    matches!(op, "ubrace" | "underbrace" | "obrace" | "overbrace")
+}
+
+pub(crate) fn root_char(index: &Simple<'_>) -> Option<char> {
     match index {
         num!("2") => Some('√'),
         num!("3") => Some('∛'),
@@ -530,7 +555,7 @@ impl Conf {
         self.placeholders.map(|marks| marks.sup)
     }
 
-    fn unwrap_single<'s, 'a>(self, simple: &'s Simple<'a>) -> &'s Simple<'a> {
+    pub(crate) fn unwrap_single<'s, 'a>(self, simple: &'s Simple<'a>) -> &'s Simple<'a> {
         if self.strip_brackets {
             unwrap_parens(simple)
         } else {
@@ -809,53 +834,33 @@ impl Conf {
         simple: &SimpleUnary<'_>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
-        match (simple.op, simple.arg()) {
-            ("sqrt", arg) => self.inline_root("√", arg, out),
-            // fonts
-            ("bb" | "mathbf" | "bold", arg) => self.inline_font(&[Style::Bold], arg, out),
-            ("bbb" | "mathbb", arg) => self.inline_font(&[Style::Double], arg, out),
-            ("cc" | "mathcal", arg) => self.inline_font(&[Style::Cal], arg, out),
-            ("tt" | "mathtt", arg) => self.inline_font(&[Style::Mono], arg, out),
-            ("fr" | "mathfrak", arg) => self.inline_font(&[Style::Frak], arg, out),
-            ("sf" | "mathsf", arg) => self.inline_font(&[Style::Sans], arg, out),
-            ("it" | "mathit" | "italic", arg) => self.inline_font(&[Style::Italic], arg, out),
-            ("bbit", arg) => self.inline_font(&[Style::Bold, Style::Italic], arg, out),
-            ("bbsf", arg) => self.inline_font(&[Style::Bold, Style::Sans], arg, out),
-            ("sfit", arg) => self.inline_font(&[Style::Italic, Style::Sans], arg, out),
-            ("bbsfit", arg) => {
-                self.inline_font(&[Style::Bold, Style::Italic, Style::Sans], arg, out)
+        if let Some((open, close)) = delimiters(simple.op) {
+            self.inline_sfunc(open, simple.arg(), close, out)
+        } else if let Some(styles) = font_styles(simple.op) {
+            self.inline_font(styles, simple.arg(), out)
+        } else {
+            match (simple.op, simple.arg()) {
+                ("sqrt", arg) => self.inline_root("√", arg, out),
+                // any bracket around literal text only delimits it
+                ("text" | "mbox", Simple::Group(group)) => self.inline_expression(&group.expr, out),
+                ("text" | "mbox", arg) => self.inline_simple(arg, out),
+                (op @ "overline", arg) => self.inline_modi(op, OVERLINE, arg, out),
+                (op @ ("underline" | "ul"), arg) => self.inline_modi(op, UNDERLINE, arg, out),
+                (op @ "cancel", arg) => self.inline_modi(op, CANCEL, arg, out),
+                (op @ "hat", arg) => self.inline_char_modi(op, '\u{0302}', None, arg, out),
+                (op @ "tilde", arg) => self.inline_char_modi(op, '\u{0303}', None, arg, out),
+                // a bar over several chars is an overline
+                (op @ "bar", arg) => {
+                    self.inline_char_modi(op, '\u{0304}', Some(OVERLINE), arg, out)
+                }
+                (op @ "dot", arg) => self.inline_char_modi(op, '\u{0307}', None, arg, out),
+                (op @ "ddot", arg) => self.inline_char_modi(op, '\u{0308}', None, arg, out),
+                (op @ ("overarc" | "overparen"), arg) => {
+                    self.inline_char_modi(op, '\u{0311}', None, arg, out)
+                }
+                (op @ "vec", arg) => self.inline_char_modi(op, '\u{20D7}', None, arg, out),
+                (op, arg) => self.inline_ugeneric(op, arg, out),
             }
-            ("bbcc", arg) => self.inline_font(&[Style::Bold, Style::Cal], arg, out),
-            ("bbfr", arg) => self.inline_font(&[Style::Bold, Style::Frak], arg, out),
-            // functions
-            ("abs" | "Abs", arg) => self.inline_sfunc("|", arg, "|", out),
-            ("ceil", arg) => self.inline_sfunc("⌈", arg, "⌉", out),
-            ("floor", arg) => self.inline_sfunc("⌊", arg, "⌋", out),
-            ("norm", arg) => self.inline_sfunc("||", arg, "||", out),
-            // any bracket around literal text only delimits it
-            ("text" | "mbox", Simple::Group(group)) => self.inline_expression(&group.expr, out),
-            ("text" | "mbox", arg) => self.inline_simple(arg, out),
-            // braces have no plain-text form; their labels arrive as scripts
-            ("ubrace" | "underbrace" | "obrace" | "overbrace", arg) => {
-                self.inline_simple_stripped(arg, out)
-            }
-            // modifiers
-            (op @ "overline", arg) => self.inline_modi(op, OVERLINE, arg, out),
-            (op @ ("underline" | "ul"), arg) => self.inline_modi(op, UNDERLINE, arg, out),
-            (op @ "cancel", arg) => self.inline_modi(op, CANCEL, arg, out),
-            // single character modifiers
-            (op @ "hat", arg) => self.inline_char_modi(op, '\u{0302}', None, arg, out),
-            (op @ "tilde", arg) => self.inline_char_modi(op, '\u{0303}', None, arg, out),
-            // a bar over several chars is an overline
-            (op @ "bar", arg) => self.inline_char_modi(op, '\u{0304}', Some(OVERLINE), arg, out),
-            (op @ "dot", arg) => self.inline_char_modi(op, '\u{0307}', None, arg, out),
-            (op @ "ddot", arg) => self.inline_char_modi(op, '\u{0308}', None, arg, out),
-            (op @ ("overarc" | "overparen"), arg) => {
-                self.inline_char_modi(op, '\u{0311}', None, arg, out)
-            }
-            (op @ "vec", arg) => self.inline_char_modi(op, '\u{20D7}', None, arg, out),
-            // generic
-            (op, arg) => self.inline_ugeneric(op, arg, out),
         }
     }
 
@@ -1476,6 +1481,29 @@ mod tests {
     }
 
     #[test]
+    fn a_brace_is_written_as_the_command() {
+        for layout in [Layout::InlineScript, Layout::InlinePlain] {
+            let conf = Conf {
+                layout,
+                ..Default::default()
+            };
+            let render = |inp: &str| conf.parse(inp).to_string();
+            assert_eq!(render("ubrace(a+b)"), "ubrace (a+b)");
+            assert_eq!(render("underbrace(x+y)"), "underbrace (x+y)");
+            assert_eq!(render("obrace(a+b)"), "obrace (a+b)");
+            assert_eq!(render("overbrace(x+y)"), "overbrace (x+y)");
+            assert_eq!(render("ubrace(x)"), "ubrace (x)");
+            assert_eq!(render("ubrace(a+b)_c"), "ubrace (a+b)_c");
+            assert_eq!(render("ubrace(a+b)_2"), "ubrace (a+b)₂");
+            assert_eq!(render("ubrace(x)_n"), "ubrace (x)ₙ");
+            assert_eq!(render("underbrace(x+y)_n"), "underbrace (x+y)ₙ");
+            assert_eq!(render("obrace(a+b)^c"), "obrace (a+b)ᶜ");
+            assert_eq!(render("overbrace(x+y)^2"), "overbrace (x+y)²");
+            assert_eq!(render("ubrace(a+b)_c^d"), "ubrace (a+b)_c^d");
+        }
+    }
+
+    #[test]
     fn matrix_rows_without_a_bracket_to_repeat() {
         let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("{(a, if x),(b, else):}"), "{(a,if x),(b,else)");
@@ -2033,10 +2061,6 @@ mod tests {
         assert_eq!(render("color(red)(x)"), "x");
         assert_eq!(render("id(a)(x)"), "x");
         assert_eq!(render("class(b)(x+1)"), "x+1");
-        assert_eq!(render("ubrace(x+y)"), "x+y");
-        assert_eq!(render("underbrace(x+y)"), "x+y");
-        assert_eq!(render("obrace(x+y)"), "x+y");
-        assert_eq!(render("overbrace(x+y)"), "x+y");
     }
 
     #[test]
@@ -2462,8 +2486,8 @@ mod tests {
     fn nothing_to_render_leaves_no_space() {
         let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("hat"), "hat"); // a command with no argument
-        assert_eq!(render("g ubrace"), "g"); // an argument that renders to nothing
-        assert_eq!(render("dx g obrace() dy"), "dx g dy");
+        assert_eq!(render("g color(red)"), "g"); // an argument that renders to nothing
+        assert_eq!(render("dx g color(red)() dy"), "dx g dy");
     }
 
     #[test]
@@ -2523,10 +2547,10 @@ mod tests {
     #[test]
     fn kept_spaces_outlive_what_renders_to_nothing() {
         let conf = Conf::default().with_keep_spaces(true);
-        assert_eq!(conf.parse("g ubrace").to_string(), "g");
-        assert_eq!(conf.parse("obrace() a").to_string(), "a");
-        assert_eq!(conf.parse("a  obrace() b").to_string(), "a   b");
-        assert_eq!(conf.parse("a  obrace()  b").to_string(), "a    b");
+        assert_eq!(conf.parse("g color(red)").to_string(), "g");
+        assert_eq!(conf.parse("color(red)() a").to_string(), "a");
+        assert_eq!(conf.parse("a  color(red)() b").to_string(), "a   b");
+        assert_eq!(conf.parse("a  color(red)()  b").to_string(), "a    b");
     }
 
     #[test]
@@ -2633,8 +2657,8 @@ mod tests {
             .with_placeholders(Some(Placeholders::default()));
         let render = |inp: &str| conf.parse(inp).to_string();
         // the mark renders, so neither run around it is joined to the other
-        assert_eq!(render("a  obrace() b"), "a  □ b");
-        assert_eq!(render("obrace() a"), "□ a");
+        assert_eq!(render("a  color(red)() b"), "a  □ b");
+        assert_eq!(render("color(red)() a"), "□ a");
         assert_eq!(render("[[a  b,],[d,e]]"), "[[a  b,□],[d,e]]");
     }
 

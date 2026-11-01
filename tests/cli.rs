@@ -84,7 +84,7 @@ fn keep_spaces() {
         "¹⁄₍₋ₓ₎\n"
     );
     assert_eq!(
-        run(&["--keep-spaces", "--placeholders"], "a  obrace() b"),
+        run(&["--keep-spaces", "--placeholders"], "a  color(red)() b"),
         "a  □ b\n"
     );
     assert_eq!(

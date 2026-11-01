@@ -367,9 +367,11 @@ impl Conf {
         }
     }
 
-    /// Whether one-line fractions may be written as super- and subscripts
+    /// Whether fractions may be written as super- and subscripts, which the multi-line layout
+    /// leaves to the parts it writes on one line too, so that letters don't decide how a
+    /// fraction looks
     fn script_fracs(self) -> bool {
-        self.layout != Layout::InlinePlain
+        self.layout == Layout::InlineScript
     }
 
     /// This conf for the cells of a grid, whose typed whitespace the multi-line layout drops
@@ -402,7 +404,9 @@ pub struct Asciimath<'a> {
 impl fmt::Display for Asciimath<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.conf.layout == Layout::Block {
-            let block = self.conf.block_expression(&self.expr);
+            let block = self
+                .conf
+                .block_expression(&self.expr, inline::Font::default());
             write!(f, "{block}")
         } else {
             self.conf.inline_expression(&self.expr, &mut Mapper::new(f))

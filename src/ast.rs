@@ -65,6 +65,17 @@ pub fn is_empty_grouping(simple: &Simple<'_>) -> bool {
     }
 }
 
+/// The brackets a delimiting command like `abs` puts around its argument
+pub(crate) fn delimiters(op: &str) -> Option<(&'static str, &'static str)> {
+    match op {
+        "abs" | "Abs" => Some(("|", "|")),
+        "ceil" => Some(("⌈", "⌉")),
+        "floor" => Some(("⌊", "⌋")),
+        "norm" => Some(("||", "||")),
+        _ => None,
+    }
+}
+
 /// Whether a function name was written with no argument after it; a name like `f` or `sin` reads
 /// fine alone, so it gets no placeholder
 pub fn name_without_argument(arg: &Simple<'_>) -> bool {
