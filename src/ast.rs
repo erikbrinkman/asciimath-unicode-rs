@@ -1,7 +1,8 @@
 //! What both layouts ask of the parsed math
 
-use super::tokens::bracket_str;
+use super::tokens::{bracket_str, raw_class};
 
+use asciimath_parser::SymbolClass;
 use asciimath_parser::tree::{
     Expression, Frac, Func, Group, Intermediate, Script, ScriptFunc, Simple, SimpleScript, Symbol,
 };
@@ -123,145 +124,13 @@ pub(crate) fn extract_vulgar_frac(
     }
 }
 
-/// Whether `sym` is an operator or relation that can get a space on either side
-#[allow(clippy::too_many_lines)]
-pub(crate) fn is_spaced_operator(sym: &str) -> bool {
-    matches!(
-        sym,
-        "+" | "-"
-            | "="
-            | "!="
-            | "ne"
-            | "≠"
-            | "<"
-            | "lt"
-            | "<="
-            | "le"
-            | "lt="
-            | "leq"
-            | "≤"
-            | ">"
-            | "gt"
-            | ">="
-            | "ge"
-            | "gt="
-            | "geq"
-            | "≥"
-            | "mlt"
-            | "ll"
-            | "mgt"
-            | "gg"
-            | "-<"
-            | "prec"
-            | "-lt"
-            | ">-"
-            | "succ"
-            | "-<="
-            | "preceq"
-            | ">-="
-            | "succeq"
-            | "in"
-            | "!in"
-            | "notin"
-            | "sub"
-            | "subset"
-            | "sup"
-            | "supset"
-            | "sube"
-            | "subseteq"
-            | "supe"
-            | "supseteq"
-            | "!sub"
-            | "nsub"
-            | "notsubset"
-            | "!sup"
-            | "nsup"
-            | "notsupset"
-            | "!sube"
-            | "nsubseteq"
-            | "notsubseteq"
-            | "!supe"
-            | "nsupseteq"
-            | "notsupseteq"
-            | "!-="
-            | "notequiv"
-            | "-="
-            | "equiv"
-            | "~="
-            | "cong"
-            | "~~"
-            | "approx"
-            | "~"
-            | "sim"
-            | "prop"
-            | "propto"
-            | "=>"
-            | "implies"
-            | "<=>"
-            | "iff"
-            | "AA"
-            | "forall"
-            | "EE"
-            | "exists"
-            | "|--"
-            | "vdash"
-            | "|=="
-            | "models"
-            | "and"
-            | "or"
-            | "if"
-            | "+-"
-            | "pm"
-            | "-+"
-            | "mp"
-            | "xx"
-            | "times"
-            | "-:"
-            | "div"
-            | "divide"
-            | "*"
-            | "cdot"
-            | "**"
-            | "ast"
-            | "o+"
-            | "oplus"
-            | "ox"
-            | "otimes"
-            | "o."
-            | "odot"
-            | "^^"
-            | "wedge"
-            | "land"
-            | "vv"
-            | "vee"
-            | "lor"
-            | "nn"
-            | "cap"
-            | "uu"
-            | "cup"
-            | "rarr"
-            | "rightarrow"
-            | "->"
-            | "to"
-            | "larr"
-            | "leftarrow"
-            | "<-"
-            | "harr"
-            | "leftrightarrow"
-            | "<->"
-            | "rArr"
-            | "Rightarrow"
-            | "==>"
-            | "lArr"
-            | "Leftarrow"
-            | "<=="
-            | "hArr"
-            | "Leftrightarrow"
-            | "<==>"
-            | "|->"
-            | "mapsto"
-            | "rightleftharpoons"
-    )
+/// The class of a symbol, or of a character typed in a symbol's unicode form
+fn symbol_class(simple: &Simple<'_>) -> Option<SymbolClass> {
+    match *simple {
+        Simple::Symbol(Symbol { class, .. }) => Some(class),
+        Simple::Operator(raw) => raw_class(raw),
+        _ => None,
+    }
 }
 
 /// How an item behaves at one of its edges when deciding whether a space separates it from its
@@ -274,7 +143,7 @@ pub(crate) enum Edge {
     Word,
     /// a function-like word such as `lim` or `max` that touches a following bracket
     Applied,
-    /// a big operator or `lim` with scripts; always separated from what follows
+    /// a symbol taking an operand, with scripts
     Scripted,
     /// an opening bracket
     Bracket,
@@ -282,61 +151,33 @@ pub(crate) enum Edge {
     Operand,
 }
 
-fn is_big_operator(sym: &str) -> bool {
-    matches!(
-        sym,
-        "sum"
-            | "prod"
-            | "int"
-            | "oint"
-            | "iint"
-            | "iiint"
-            | "oiint"
-            | "oiiint"
-            | "^^^"
-            | "bigwedge"
-            | "vvv"
-            | "bigvee"
-            | "nnn"
-            | "bigcap"
-            | "uuu"
-            | "bigcup"
-    )
-}
-
 fn simple_edges(simple: &Simple<'_>, script: &Script<'_>) -> (Edge, Edge) {
     let scripted = !matches!(script, Script::None);
-    match *simple {
-        Simple::Symbol(Symbol {
-            text: "and" | "or" | "if" | "mod" | "dx" | "dy" | "dz" | "dt",
-            ..
-        }) => (Edge::Word, Edge::Word),
-        Simple::Symbol(Symbol { text, .. }) if is_big_operator(text) => (
-            Edge::Operand,
-            if scripted {
+    match (simple, symbol_class(simple)) {
+        (Simple::Func(_), _) => (Edge::Word, Edge::Operand),
+        (Simple::Group(_) | Simple::Matrix(_), _) => (Edge::Bracket, Edge::Operand),
+        (Simple::Sign(_), _) if !scripted => (Edge::Operator, Edge::Operator),
+        (_, Some(class)) if class.takes_operand() => {
+            let after = if scripted {
                 Edge::Scripted
+            } else if class.is_name() {
+                Edge::Applied
             } else {
                 Edge::Operator
-            },
-        ),
-        Simple::Symbol(Symbol { text, .. }) | Simple::Sign(text)
-            if !scripted && (text == "," || is_spaced_operator(text)) =>
+            };
+            let before = if class.is_name() {
+                Edge::Word
+            } else {
+                Edge::Operand
+            };
+            (before, after)
+        }
+        (_, Some(class)) if class.is_name() => (Edge::Word, Edge::Word),
+        (_, Some(class))
+            if !scripted && (class.joins_operands() || class == SymbolClass::Separator) =>
         {
             (Edge::Operator, Edge::Operator)
         }
-        Simple::Symbol(Symbol {
-            text: "lim" | "Lim" | "dim" | "min" | "max" | "lub" | "glb",
-            ..
-        }) => (
-            Edge::Word,
-            if scripted {
-                Edge::Scripted
-            } else {
-                Edge::Applied
-            },
-        ),
-        Simple::Func(_) => (Edge::Word, Edge::Operand),
-        Simple::Group(_) | Simple::Matrix(_) => (Edge::Bracket, Edge::Operand),
         _ => (Edge::Operand, Edge::Operand),
     }
 }
@@ -455,10 +296,13 @@ pub(crate) fn separated_items<'e, 'a, T>(
 pub(crate) fn inter_is_spaced_op(inter: &Intermediate<'_>) -> bool {
     match inter {
         Intermediate::ScriptFunc(ScriptFunc::Simple(SimpleScript {
-            simple:
-                Simple::Symbol(Symbol { text, .. }) | Simple::Sign(text) | Simple::Operator(text),
+            simple: Simple::Sign(_),
             script: Script::None,
-        })) => is_spaced_operator(text),
+        })) => true,
+        Intermediate::ScriptFunc(ScriptFunc::Simple(SimpleScript {
+            simple,
+            script: Script::None,
+        })) => symbol_class(simple).is_some_and(SymbolClass::joins_operands),
         _ => false,
     }
 }

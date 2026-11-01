@@ -1532,8 +1532,15 @@ mod tests {
         assert_eq!(render_block_spacing_operators("-x+1"), "-x + 1");
         assert_eq!(render_block_spacing_operators("x = -1"), "x = -1");
         assert_eq!(render_block_spacing_operators("1 - - x"), "1 - -x");
-        // `:=` gets no spaces of its own yet, but the sign after it still hugs
-        assert_eq!(render_block_spacing_operators("a := -b"), "a:=-b");
+        assert_eq!(render_block_spacing_operators("a := -b"), "a := -b");
+    }
+
+    #[test]
+    fn spacing_follows_each_symbols_class() {
+        assert_eq!(render_block("dx:=y"), "dx:=y");
+        assert_eq!(render_block_spacing_operators("a circ b"), "a ∘ b");
+        assert_eq!(render_block_spacing_operators("a ⊂ b"), "a ⊂ b");
+        assert_eq!(render_block_spacing_operators("AAx"), "∀x");
     }
 
     #[test]

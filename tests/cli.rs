@@ -116,10 +116,7 @@ fn spaced_operators() {
         run(&["--spaced-operators", "--keep-spaces"], "a  +b"),
         "a  + b\n"
     );
-    assert_eq!(
-        run(&["--spaced-operators"], "sum_(i=1)^n i"),
-        "∑ᵢ\u{2009}₌\u{2009}₁ⁿ i\n"
-    );
+    assert_eq!(run(&["--spaced-operators"], "sum_(i=1)^n i"), "∑ᵢ₌₁ⁿ i\n");
     assert_eq!(
         run(
             &["--layout", "block", "--spaced-operators"],

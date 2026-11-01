@@ -83,7 +83,7 @@ pub struct Conf {
     /// Write the whitespace typed between parts of the math back out
     pub keep_spaces: bool,
     /// Put a space on either side of an operator that joins two parts of the math, except inside
-    /// a raised or lowered script in the multi-line layout
+    /// a raised or lowered script
     pub spaced_operators: bool,
 }
 
@@ -216,9 +216,8 @@ impl Conf {
         }
     }
 
-    /// Whether fractions may be written as super- and subscripts, which the multi-line layout
-    /// leaves to the parts it writes on one line too, so that letters don't decide how a
-    /// fraction looks
+    /// Whether fractions may be written as super- and subscripts; only the one-line script
+    /// layout does
     fn script_fracs(self) -> bool {
         self.layout == Layout::InlineScript
     }
