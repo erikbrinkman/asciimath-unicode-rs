@@ -5,29 +5,6 @@ use std::io::{Read, Write};
 use std::process;
 
 #[derive(Debug, Clone, ValueEnum)]
-enum Tone {
-    Default,
-    Light,
-    MediumLight,
-    Medium,
-    MediumDark,
-    Dark,
-}
-
-impl From<Tone> for SkinTone {
-    fn from(inp: Tone) -> Self {
-        match inp {
-            Tone::Default => SkinTone::Default,
-            Tone::Light => SkinTone::Light,
-            Tone::MediumLight => SkinTone::MediumLight,
-            Tone::Medium => SkinTone::Medium,
-            Tone::MediumDark => SkinTone::MediumDark,
-            Tone::Dark => SkinTone::Dark,
-        }
-    }
-}
-
-#[derive(Debug, Clone, ValueEnum)]
 enum LayoutArg {
     /// One line, fractions as super- and subscripts
     InlineScript,
@@ -47,9 +24,50 @@ impl From<LayoutArg> for Layout {
     }
 }
 
-/// Convert asciimath in stdin to unicode in stdout
+include!("skin_tones.rs");
+
+macro_rules! skin_tone_args {
+    ($($tone:ident),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy, ValueEnum)]
+        enum SkinToneArg {
+            $($tone,)+
+        }
+
+        impl From<SkinToneArg> for SkinTone {
+            fn from(inp: SkinToneArg) -> Self {
+                match inp {
+                    $(SkinToneArg::$tone => SkinTone::$tone,)+
+                }
+            }
+        }
+    };
+}
+
+with_skin_tones!(skin_tone_args);
+
+/// What `-h` says about `--skin-tone`, too short to list every tone
+const SKIN_TONE_HELP: &str = "Skin tone for emoji: light, medium-light, medium, medium-dark or dark, \
+                              or two different ones joined by -and- for emoji of two people, like \
+                              light-and-dark";
+
+/// What `--help` says about `--skin-tone`, with every tone
+fn skin_tone_long_help() -> String {
+    let names: Vec<String> = SkinToneArg::value_variants()
+        .iter()
+        .filter_map(ValueEnum::to_possible_value)
+        .map(|value| value.get_name().to_owned())
+        .collect();
+    format!(
+        "{SKIN_TONE_HELP}\n\n[possible values: {}]",
+        names.join(", ")
+    )
+}
+
+/// Convert asciimath in stdin to unicode in stdout. All of stdin is read as one expression, line
+/// breaks included.
 #[derive(Debug, Clone, Parser)]
-#[command(version, about)]
+#[command(version)]
+#[allow(clippy::struct_excessive_bools)]
 struct Args {
     /// Keep ( ), [ ] and { } around fractions, scripts and command arguments
     #[arg(long)]
@@ -59,9 +77,15 @@ struct Args {
     #[arg(long)]
     no_vulgar_fracs: bool,
 
-    /// Skin tone for emoji
-    #[arg(long, value_enum, default_value_t = Tone::Default)]
-    skin_tone: Tone,
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = SkinToneArg::Default,
+        hide_possible_values = true,
+        help = SKIN_TONE_HELP,
+        long_help = skin_tone_long_help()
+    )]
+    skin_tone: SkinToneArg,
 
     /// How to lay out the math
     #[arg(long, value_enum, default_value_t = LayoutArg::InlineScript)]

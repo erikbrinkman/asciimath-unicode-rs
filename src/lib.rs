@@ -1,43 +1,4 @@
-//! A module for converting asciimath to unicode
-//!
-//! To convert asciimath quickly, you can use [`parse_unicode`] to get an [`Asciimath`] value that
-//! implements [`fmt::Display`]. If you want more control, see the options exposed through [`Conf`]
-//! which can [`parse`][Conf::parse] input into [`Asciimath`] as well.
-//!
-//! All of the input is read as math, so prose run through this comes out mangled: `it is` renders
-//! as `𝑖s`. Pick the math out of prose first.
-//!
-//! # Usage
-//!
-//! ## Binary
-//!
-//! This crate provides a simple cli for converting asciimath to unicode:
-//!
-//! ```bash
-//! cargo install asciimath-unicode --features binary
-//! ```
-//!
-//! ```bash
-//! asciimath-unicode -h
-//! ```
-//!
-//! ## Library
-//!
-//! ```bash
-//! cargo add asciimath-unicode
-//! ```
-//!
-//! ```
-//! let res = asciimath_unicode::parse_unicode("1/2").to_string();
-//! assert_eq!(res, "½");
-//! ```
-//!
-//! ```
-//! use asciimath_unicode::Conf;
-//! let conf = Conf::default().with_vulgar_fracs(false);
-//! let res = conf.parse("1/2").to_string();
-//! assert_eq!(res, "¹⁄₂");
-//! ```
+#![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)]
 #![warn(clippy::pedantic, missing_docs)]
 
@@ -91,40 +52,14 @@ macro_rules! skin_tones {
     };
 }
 
-skin_tones! {
-    Default,
-    Light,
-    MediumLight,
-    Medium,
-    MediumDark,
-    Dark,
-    LightAndMediumLight,
-    LightAndMedium,
-    LightAndMediumDark,
-    LightAndDark,
-    MediumLightAndLight,
-    MediumLightAndMedium,
-    MediumLightAndMediumDark,
-    MediumLightAndDark,
-    MediumAndLight,
-    MediumAndMediumLight,
-    MediumAndMediumDark,
-    MediumAndDark,
-    MediumDarkAndLight,
-    MediumDarkAndMediumLight,
-    MediumDarkAndMedium,
-    MediumDarkAndDark,
-    DarkAndLight,
-    DarkAndMediumLight,
-    DarkAndMedium,
-    DarkAndMediumDark,
-}
+include!("skin_tones.rs");
+with_skin_tones!(skin_tones);
 
 /// Configuration for unicode rendering of asciimath
 ///
 /// Start from [`Conf::default()`][Default::default] and change what you need, by field or with the
 /// `with_*` methods.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[allow(clippy::struct_excessive_bools)]
 #[non_exhaustive]
 pub struct Conf {
@@ -418,4 +353,22 @@ impl fmt::Display for Asciimath<'_> {
 #[must_use]
 pub fn parse_unicode(inp: &str) -> Asciimath<'_> {
     Conf::default().parse(inp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Conf, Layout};
+    use std::collections::HashSet;
+
+    #[test]
+    fn confs_hash_by_value() {
+        let confs: HashSet<Conf> = [
+            Conf::default(),
+            Conf::default(),
+            Conf::default().with_layout(Layout::Block),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(confs.len(), 2);
+    }
 }
