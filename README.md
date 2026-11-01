@@ -3,14 +3,15 @@ Asciimath Unicode
 
 [![crates.io](https://img.shields.io/crates/v/asciimath-unicode)](https://crates.io/crates/asciimath-unicode)
 [![docs](https://docs.rs/asciimath-unicode/badge.svg)](https://docs.rs/asciimath-unicode)
-[![license](https://img.shields.io/github/license/erikbrinkman/asciimath-unicode-rs)](LICENSE)
+[![license](https://img.shields.io/github/license/erikbrinkman/asciimath-unicode-rs)](https://github.com/erikbrinkman/asciimath-unicode-rs/blob/main/LICENSE)
 [![tests](https://github.com/erikbrinkman/asciimath-unicode-rs/actions/workflows/rust.yml/badge.svg)](https://github.com/erikbrinkman/asciimath-unicode-rs/actions/workflows/rust.yml)
 
 Render asciimath to unicode.
 
-To convert asciimath quickly, you can use `parse_unicode` to get an `Asciimath`
-value that implements `Display`.  If you want more control, see the options
-exposed through `Conf` which can `parse` input into `Asciimath` as well.
+To convert asciimath quickly, you can use [`parse_unicode`] to get an
+[`Asciimath`] value that implements [`Display`].  If you want more control, see
+the options exposed through [`Conf`] which can [`parse`] input into
+[`Asciimath`] as well.
 
 All of the input is read as math, so prose run through this comes out mangled:
 `it is` renders as `𝑖s`.  Pick the math out of prose first.
@@ -93,3 +94,9 @@ one width narrower when it lands in a script, and a fixed-width font draws it no
 full cell, so `Block` leaves these spaces out inside a raised or lowered script: `x^(a+b)` renders
 `xᵃ⁺ᵇ` there and `xᵃ ⁺ ᵇ` in a one-line layout.  The spaces a script gets for any other reason are written there
 either way.
+
+[`parse_unicode`]: https://docs.rs/asciimath-unicode/latest/asciimath_unicode/fn.parse_unicode.html
+[`Asciimath`]: https://docs.rs/asciimath-unicode/latest/asciimath_unicode/struct.Asciimath.html
+[`Display`]: https://doc.rust-lang.org/std/fmt/trait.Display.html
+[`Conf`]: https://docs.rs/asciimath-unicode/latest/asciimath_unicode/struct.Conf.html
+[`parse`]: https://docs.rs/asciimath-unicode/latest/asciimath_unicode/struct.Conf.html#method.parse
