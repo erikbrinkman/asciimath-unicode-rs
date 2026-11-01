@@ -6,7 +6,8 @@ use asciimath_parser::tree::{
 };
 use std::fmt;
 use std::fmt::Write;
-use unicode_normalization::char::compose;
+use unicode_normalization::char::{compose, is_combining_mark};
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::ast::{
@@ -15,16 +16,124 @@ use super::ast::{
     unwrap_parens,
 };
 use super::tokens::{
-    bold_map, cal_map, double_map, frak_map, italic_map, left_bracket_str, mono_map,
-    right_bracket_str, sans_map, subscript_char, superscript_char, symbol_str,
+    bold_map, cal_map, double_map, frak_map, is_bracket_char, italic_map, left_bracket_str,
+    mono_map, right_bracket_str, sans_map, subscript_char, superscript_char, symbol_str,
 };
 use super::{Conf, Layout};
 
+/// The combining mark drawing a line over every char
+const OVERLINE: char = '\u{0305}';
+/// The combining mark drawing a line under every char
+const UNDERLINE: char = '\u{0332}';
+/// The combining mark drawing a line through the middle of every char
+const CANCEL: char = '\u{0336}';
+/// The combining marks that draw a line through every char
+const LINE_MARKS: [char; 3] = [OVERLINE, UNDERLINE, CANCEL];
+
+/// A style a font command gives each char
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Style {
+    /// bold
+    Bold,
+    /// italic
+    Italic,
+    /// calligraphic script
+    Cal,
+    /// fraktur
+    Frak,
+    /// double-struck
+    Double,
+    /// sans-serif
+    Sans,
+    /// monospace
+    Mono,
+}
+
+impl Style {
+    /// `chr` in this style, keeping the styles it already has where a char combines them
+    fn apply(self, chr: char) -> char {
+        match self {
+            Style::Bold => bold_map(chr),
+            Style::Italic => italic_map(chr),
+            Style::Cal => cal_map(chr),
+            Style::Frak => frak_map(chr),
+            Style::Double => double_map(chr),
+            Style::Sans => sans_map(chr),
+            Style::Mono => mono_map(chr),
+        }
+    }
+}
+
+/// The styles of the fonts a char is in, outermost first and each at most once
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Font([Option<Style>; 7]);
+
+impl Font {
+    /// This font inside the font of `styles`, which are given outermost first; a style applied
+    /// again changes nothing, so one already here is left out
+    fn within(self, styles: &[Style]) -> Self {
+        let Font(mut slots) = self;
+        for &style in styles {
+            if !slots.contains(&Some(style))
+                && let Some(slot) = slots.iter_mut().find(|slot| slot.is_none())
+            {
+                *slot = Some(style);
+            }
+        }
+        Font(slots)
+    }
+
+    fn is_plain(self) -> bool {
+        self.0.iter().all(Option::is_none)
+    }
+
+    /// `chr` in this font, the innermost style applied first
+    pub fn apply(self, chr: char) -> char {
+        self.0
+            .into_iter()
+            .rev()
+            .flatten()
+            .fold(chr, |styled, style| style.apply(styled))
+    }
+
+    /// Whether this font leaves every char of `text` as it is
+    pub fn leaves(self, text: &str) -> bool {
+        text.chars().all(|chr| self.apply(chr) == chr)
+    }
+}
+
+/// The lines drawn through every char, each at most once, in the order they were applied
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Lines([Option<char>; LINE_MARKS.len()]);
+
+impl Lines {
+    /// These lines and `mark`
+    fn with(self, mark: char) -> Self {
+        debug_assert!(LINE_MARKS.contains(&mark), "{mark:?} is not a line mark");
+        let Lines(mut marks) = self;
+        if !marks.contains(&Some(mark))
+            && let Some(slot) = marks.iter_mut().find(|slot| slot.is_none())
+        {
+            *slot = Some(mark);
+        }
+        Lines(marks)
+    }
+
+    fn is_empty(self) -> bool {
+        self.0.iter().all(Option::is_none)
+    }
+
+    /// The marks to write after a char, the innermost one nearest it
+    fn marks(self) -> impl Iterator<Item = char> {
+        self.0.into_iter().rev().flatten()
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MapperConf {
-    pub font: Option<fn(char) -> char>,
+    pub font: Font,
     pub sub_sup: Option<fn(char) -> Option<char>>,
-    pub modifier: Option<char>,
+    pub lines: Lines,
 }
 
 impl MapperConf {
@@ -34,7 +143,7 @@ impl MapperConf {
             Some(MapperConf {
                 font: self.font,
                 sub_sup: Some(sub_sup),
-                modifier: self.modifier,
+                lines: self.lines,
             })
         } else {
             None
@@ -47,6 +156,23 @@ impl MapperConf {
 
     pub fn with_sup(&self) -> Option<MapperConf> {
         self.with_sub_sup(superscript_char)
+    }
+
+    /// `chr` styled and raised or lowered, or an error if it has no raised or lowered form
+    fn map_char(self, chr: char) -> Result<char, fmt::Error> {
+        let styled = self.font.apply(chr);
+        match self.sub_sup {
+            Some(script) => script(styled).ok_or(fmt::Error),
+            None => Ok(styled),
+        }
+    }
+
+    /// This configuration without its lines
+    fn unlined(self) -> MapperConf {
+        MapperConf {
+            lines: Lines::default(),
+            ..self
+        }
     }
 
     pub fn wrap<S: Write>(self, other: &mut S) -> Mapper<'_, S> {
@@ -71,13 +197,15 @@ impl<'a, W: fmt::Write + ?Sized> Mapper<'a, W> {
         }
     }
 
-    pub fn with_font(&mut self, f: fn(char) -> char) -> Mapper<'_, W> {
+    /// This mapper styling each char in the font of `styles`, given outermost first, before the
+    /// font it already has
+    pub fn with_font(&mut self, styles: &[Style]) -> Mapper<'_, W> {
         Mapper {
             inner: &mut *self.inner,
             conf: MapperConf {
-                font: Some(f),
+                font: self.conf.font.within(styles),
                 sub_sup: self.conf.sub_sup,
-                modifier: self.conf.modifier,
+                lines: self.conf.lines,
             },
         }
     }
@@ -88,7 +216,7 @@ impl<'a, W: fmt::Write + ?Sized> Mapper<'a, W> {
             conf: MapperConf {
                 font: self.conf.font,
                 sub_sup: self.conf.sub_sup,
-                modifier: Some(c),
+                lines: self.conf.lines.with(c),
             },
         }
     }
@@ -113,73 +241,62 @@ impl<'a, W: fmt::Write + ?Sized> Mapper<'a, W> {
             conf: self.conf,
         }
     }
+
+    /// Write `text`, already styled and raised or lowered, with this mapper's lines through each
+    /// char that takes them
+    fn write_lined(&mut self, text: &str) -> fmt::Result {
+        if self.conf.lines.is_empty() {
+            self.inner.write_str(text)
+        } else {
+            for cluster in text.graphemes(true) {
+                self.inner.write_str(cluster)?;
+                // a line through brackets would suggest they're part of the marked text
+                if cluster.chars().next().is_some_and(|base| {
+                    !base.is_whitespace() && !is_bracket_char(base) && !is_combining_mark(base)
+                }) {
+                    for line in self.conf.lines.marks() {
+                        if !cluster.contains(line) {
+                            self.inner.write_char(line)?;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Write `base`, one char already styled and raised or lowered with only marks after it, with
+    /// `mark` over it and this mapper's lines through it
+    fn write_accented(&mut self, base: &str, mark: char) -> fmt::Result {
+        let mut accented = String::new();
+        if let Some(composed) = only(base.chars()).and_then(|chr| compose(chr, mark)) {
+            accented.push(composed);
+        } else {
+            accented.push_str(base);
+            accented.push(mark);
+        }
+        self.write_lined(&accented)
+    }
 }
 
 impl<W: fmt::Write + ?Sized> fmt::Write for Mapper<'_, W> {
     /// Only a mapper over a string is asked whether a rendering maps, so a char with no script
     /// form failing here never looks like a real writer's error
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        if self.conf.font.is_none() && self.conf.sub_sup.is_none() && self.conf.modifier.is_none() {
-            self.inner.write_str(s)
-        } else {
-            for mut c in s.chars() {
-                if let Some(script) = self.conf.sub_sup {
-                    c = script(c).ok_or(fmt::Error)?;
-                }
-                if let Some(font) = self.conf.font {
-                    c = font(c);
-                }
-                self.inner.write_char(c)?;
-                // a line through brackets would suggest they're part of the marked text
-                if let Some(modifier) = self.conf.modifier
-                    && !c.is_whitespace()
-                    && !is_bracket_char(c)
-                {
-                    self.inner.write_char(modifier)?;
-                }
+        if self.conf.font.is_plain() && self.conf.sub_sup.is_none() {
+            self.write_lined(s)
+        } else if self.conf.lines.is_empty() {
+            for chr in s.chars() {
+                self.inner.write_char(self.conf.map_char(chr)?)?;
             }
             Ok(())
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-struct SingleChar(Option<char>);
-
-impl fmt::Write for SingleChar {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for char in s.chars() {
-            if self.0.is_none() {
-                self.0 = Some(char);
-            } else {
-                return Err(fmt::Error);
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Default)]
-struct SmallBuf {
-    buf: [u8; 4],
-    len: usize,
-}
-
-impl SmallBuf {
-    fn as_str(&self) -> Option<&str> {
-        std::str::from_utf8(&self.buf[..self.len]).ok()
-    }
-}
-
-impl fmt::Write for SmallBuf {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        let bytes = s.as_bytes();
-        if self.len + bytes.len() > 4 {
-            Err(fmt::Error)
         } else {
-            self.buf[self.len..self.len + bytes.len()].copy_from_slice(bytes);
-            self.len += bytes.len();
-            Ok(())
+            // lines go after each char a reader sees, so they need the whole mapped text
+            let mapped = s
+                .chars()
+                .map(|chr| self.conf.map_char(chr))
+                .collect::<Result<String, _>>()?;
+            self.write_lined(&mapped)
         }
     }
 }
@@ -216,11 +333,24 @@ fn only<T>(mut iter: impl Iterator<Item = T>) -> Option<T> {
     if iter.next().is_none() { first } else { None }
 }
 
-fn is_bracket_char(chr: char) -> bool {
-    matches!(
-        chr,
-        '(' | ')' | '[' | ']' | '{' | '}' | '|' | '⟨' | '⟩' | '⌊' | '⌋' | '⌈' | '⌉'
-    )
+/// Whether `text` is what a reader sees as one char that isn't an emoji, so a mark can sit on it
+fn takes_accent(text: &str) -> bool {
+    only(text.graphemes(true)).is_some_and(|cluster| !is_emoji(cluster))
+}
+
+/// Whether any char a reader sees in `text` is an emoji, which no mark is drawn over
+fn has_emoji(text: &str) -> bool {
+    text.graphemes(true).any(is_emoji)
+}
+
+/// Whether `cluster`, one char as a reader sees it, is drawn as an emoji
+fn is_emoji(cluster: &str) -> bool {
+    // a lone char that needs U+FE0F to be an emoji, like `↔` or `❤`, is drawn as text without it
+    cluster
+        .chars()
+        .any(|chr| ('\u{1f1e6}'..='\u{1f1ff}').contains(&chr))
+        || emojis::get(cluster)
+            .is_some_and(|emoji| emoji.as_str() == cluster || cluster.chars().nth(1).is_some())
 }
 
 fn combining_letter(letter: &str) -> Option<char> {
@@ -451,20 +581,38 @@ impl Conf {
         }
     }
 
-    /// Render `simple` into a single char if it is one, already styled by `out`
-    fn single_char(self, simple: &Simple<'_>, out: &Mapper<impl fmt::Write>) -> Option<char> {
-        let mut single = SingleChar::default();
-        self.inline_simple_stripped(simple, &mut out.onto(&mut single))
-            .ok()?;
-        single.0
+    /// `simple` rendered without its grouping brackets or `out`'s lines, but in its font and script
+    fn render_unlined(
+        self,
+        simple: &Simple<'_>,
+        out: &Mapper<impl fmt::Write>,
+    ) -> Result<String, fmt::Error> {
+        self.mapped_operand(simple, out.conf.unlined())
+            .ok_or(fmt::Error)
     }
 
-    /// The relation symbol for `=` with `over` stacked above it
-    fn equals_char(self, over: &Simple<'_>, out: &Mapper<impl fmt::Write>) -> Option<char> {
-        let mut buf = SmallBuf::default();
-        self.inline_simple_stripped(over, &mut out.onto(&mut buf))
-            .ok()?;
-        match buf.as_str()? {
+    /// Write `simple` as it was typed, brackets and all, from its
+    /// [`render_unlined`][Conf::render_unlined] rendering
+    fn write_as_written(
+        self,
+        simple: &Simple<'_>,
+        unlined: &str,
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
+        if let Simple::Group(group) = simple
+            && self.stripped(simple).is_some()
+        {
+            out.write_str(left_bracket_str(group.left_bracket))?;
+            out.write_lined(unlined)?;
+            out.write_str(right_bracket_str(group.right_bracket))
+        } else {
+            out.write_lined(unlined)
+        }
+    }
+
+    /// The relation symbol for `=` with `over`, rendered as `text`, stacked above it
+    fn equals_char(text: &str) -> Option<char> {
+        match text {
             "∘" => Some('\u{2257}'),
             "⋆" => Some('\u{225b}'),
             "△" => Some('\u{225c}'),
@@ -475,8 +623,7 @@ impl Conf {
         }
     }
 
-    /// A space separates the name from its argument unless the argument hugs it or renders to
-    /// nothing
+    /// Write a name's argument after it
     fn inline_applied_arg<'a>(
         self,
         arg: &impl Operand<'a>,
@@ -485,10 +632,16 @@ impl Conf {
     ) -> fmt::Result {
         let mut text = String::new();
         arg.inline_as_written(self, &mut out.onto(&mut text))?;
+        Self::write_applied_arg(&text, hugs, out)
+    }
+
+    /// Write a name's argument, already written as `text`, after it; a space separates them
+    /// unless the argument hugs the name or renders to nothing
+    fn write_applied_arg(text: &str, hugs: bool, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
         if !hugs && !text.is_empty() {
             out.write_char(' ')?;
         }
-        out.inner.write_str(&text)
+        out.inner.write_str(text)
     }
 
     fn inline_bgeneric(
@@ -509,17 +662,33 @@ impl Conf {
         base: &Simple<'_>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
-        if let iden!(letter) = self.unwrap_single(over)
-            && let Some(mark) = combining_letter(letter)
-            && let Some(base_char) = self.single_char(base, out)
-        {
-            // base_char is already styled; write to inner so the font isn't re-applied
-            out.inner.write_char(base_char)?;
-            out.write_char(mark)
-        } else if matches!(self.unwrap_single(base), symb!("="))
-            && let Some(relation) = self.equals_char(over, out)
-        {
-            out.write_char(relation)
+        let mark = match self.unwrap_single(over) {
+            iden!(letter) => combining_letter(letter),
+            _ => None,
+        };
+        if let Some(mark) = mark {
+            let text = self.render_unlined(base, out)?;
+            if takes_accent(&text) {
+                out.write_accented(&text, mark)
+            } else {
+                out.write_lined(&text)?;
+                self.inline_sub_or_sup(over, out.conf.with_sup(), '^', self.sup_placeholder(), out)
+            }
+        } else if matches!(self.unwrap_single(base), symb!("=")) {
+            let text = self.render_unlined(over, out)?;
+            if let Some(relation) = Self::equals_char(&text) {
+                out.write_char(relation)
+            } else {
+                self.inline_simple_stripped(base, out)?;
+                if let Some(raised) =
+                    self.mapped_script(over, out.conf.with_sup(), self.sup_placeholder())
+                {
+                    out.inner.write_str(&raised)
+                } else {
+                    out.write_char('^')?;
+                    self.write_as_written(over, &text, out)
+                }
+            }
         } else {
             self.inline_simple_stripped(base, out)?;
             self.inline_sub_or_sup(over, out.conf.with_sup(), '^', self.sup_placeholder(), out)
@@ -554,11 +723,11 @@ impl Conf {
 
     fn inline_font(
         self,
-        font: fn(char) -> char,
+        styles: &[Style],
         arg: &Simple<'_>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
-        self.inline_simple_stripped(arg, &mut out.with_font(font))
+        self.inline_simple_stripped(arg, &mut out.with_font(styles))
     }
 
     fn inline_sfunc(
@@ -573,13 +742,34 @@ impl Conf {
         out.write_str(close)
     }
 
+    /// No line is drawn through an emoji, so an argument with one falls back to `op arg`
     fn inline_modi(
         self,
-        chr: char,
+        op: &str,
+        line: char,
         arg: &Simple<'_>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
-        self.inline_simple_stripped(arg, &mut out.with_modifier(chr))
+        let text = self.render_unlined(arg, out)?;
+        if has_emoji(&text) {
+            self.write_command(op, arg, &text, out)
+        } else {
+            out.with_modifier(line).write_lined(&text)
+        }
+    }
+
+    /// Write `op` and the argument `arg`, rendered as `text`, as they were typed
+    fn write_command(
+        self,
+        op: &str,
+        arg: &Simple<'_>,
+        text: &str,
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
+        out.write_str(op)?;
+        let mut written = String::new();
+        self.write_as_written(arg, text, &mut out.onto(&mut written))?;
+        Self::write_applied_arg(&written, false, out)
     }
 
     /// A `line` goes on every char of a longer argument; a mark can only sit on one, so
@@ -592,20 +782,15 @@ impl Conf {
         arg: &Simple<'_>,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
-        // Try precomposition for single-char arguments (check AST, not rendered output)
-        if let &Simple::Ident(text) | &Simple::Number(text) = self.unwrap_single(arg)
-            && let Some(base) = only(text.chars())
-            && let Some(precomposed) = compose(base, mark)
+        let text = self.render_unlined(arg, out)?;
+        if takes_accent(&text) {
+            out.write_accented(&text, mark)
+        } else if let Some(line) = line
+            && !has_emoji(&text)
         {
-            out.write_char(precomposed)
-        } else if let Some(res) = self.single_char(arg, out) {
-            // res is already styled; write to inner so the font isn't re-applied
-            out.inner.write_char(res)?;
-            out.write_char(mark)
-        } else if let Some(line) = line {
-            self.inline_modi(line, arg, out)
+            out.with_modifier(line).write_lined(&text)
         } else {
-            self.inline_ugeneric(op, arg, out)
+            self.write_command(op, arg, &text, out)
         }
     }
 
@@ -627,21 +812,21 @@ impl Conf {
         match (simple.op, simple.arg()) {
             ("sqrt", arg) => self.inline_root("√", arg, out),
             // fonts
-            ("bb" | "mathbf" | "bold", arg) => self.inline_font(bold_map, arg, out),
-            ("bbb" | "mathbb", arg) => self.inline_font(double_map, arg, out),
-            ("cc" | "mathcal", arg) => self.inline_font(cal_map, arg, out),
-            ("tt" | "mathtt", arg) => self.inline_font(mono_map, arg, out),
-            ("fr" | "mathfrak", arg) => self.inline_font(frak_map, arg, out),
-            ("sf" | "mathsf", arg) => self.inline_font(sans_map, arg, out),
-            ("it" | "mathit" | "italic", arg) => self.inline_font(italic_map, arg, out),
-            ("bbit", arg) => self.inline_font(|chr| bold_map(italic_map(chr)), arg, out),
-            ("bbsf", arg) => self.inline_font(|chr| bold_map(sans_map(chr)), arg, out),
-            ("sfit", arg) => self.inline_font(|chr| italic_map(sans_map(chr)), arg, out),
+            ("bb" | "mathbf" | "bold", arg) => self.inline_font(&[Style::Bold], arg, out),
+            ("bbb" | "mathbb", arg) => self.inline_font(&[Style::Double], arg, out),
+            ("cc" | "mathcal", arg) => self.inline_font(&[Style::Cal], arg, out),
+            ("tt" | "mathtt", arg) => self.inline_font(&[Style::Mono], arg, out),
+            ("fr" | "mathfrak", arg) => self.inline_font(&[Style::Frak], arg, out),
+            ("sf" | "mathsf", arg) => self.inline_font(&[Style::Sans], arg, out),
+            ("it" | "mathit" | "italic", arg) => self.inline_font(&[Style::Italic], arg, out),
+            ("bbit", arg) => self.inline_font(&[Style::Bold, Style::Italic], arg, out),
+            ("bbsf", arg) => self.inline_font(&[Style::Bold, Style::Sans], arg, out),
+            ("sfit", arg) => self.inline_font(&[Style::Italic, Style::Sans], arg, out),
             ("bbsfit", arg) => {
-                self.inline_font(|chr| bold_map(italic_map(sans_map(chr))), arg, out)
+                self.inline_font(&[Style::Bold, Style::Italic, Style::Sans], arg, out)
             }
-            ("bbcc", arg) => self.inline_font(|chr| bold_map(cal_map(chr)), arg, out),
-            ("bbfr", arg) => self.inline_font(|chr| bold_map(frak_map(chr)), arg, out),
+            ("bbcc", arg) => self.inline_font(&[Style::Bold, Style::Cal], arg, out),
+            ("bbfr", arg) => self.inline_font(&[Style::Bold, Style::Frak], arg, out),
             // functions
             ("abs" | "Abs", arg) => self.inline_sfunc("|", arg, "|", out),
             ("ceil", arg) => self.inline_sfunc("⌈", arg, "⌉", out),
@@ -655,14 +840,14 @@ impl Conf {
                 self.inline_simple_stripped(arg, out)
             }
             // modifiers
-            ("overline", arg) => self.inline_modi('\u{0305}', arg, out),
-            ("underline" | "ul", arg) => self.inline_modi('\u{0332}', arg, out),
-            ("cancel", arg) => self.inline_modi('\u{0336}', arg, out),
+            (op @ "overline", arg) => self.inline_modi(op, OVERLINE, arg, out),
+            (op @ ("underline" | "ul"), arg) => self.inline_modi(op, UNDERLINE, arg, out),
+            (op @ "cancel", arg) => self.inline_modi(op, CANCEL, arg, out),
             // single character modifiers
             (op @ "hat", arg) => self.inline_char_modi(op, '\u{0302}', None, arg, out),
             (op @ "tilde", arg) => self.inline_char_modi(op, '\u{0303}', None, arg, out),
             // a bar over several chars is an overline
-            (op @ "bar", arg) => self.inline_char_modi(op, '\u{0304}', Some('\u{0305}'), arg, out),
+            (op @ "bar", arg) => self.inline_char_modi(op, '\u{0304}', Some(OVERLINE), arg, out),
             (op @ "dot", arg) => self.inline_char_modi(op, '\u{0307}', None, arg, out),
             (op @ "ddot", arg) => self.inline_char_modi(op, '\u{0308}', None, arg, out),
             (op @ ("overarc" | "overparen"), arg) => {
@@ -677,12 +862,22 @@ impl Conf {
     fn inline_matrix(self, matrix: &Matrix<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
         let left = left_bracket_str(matrix.left_bracket);
         let right = right_bracket_str(matrix.right_bracket);
+        // rows in a missing bracket would run together, and rows in bars would read as absolute
+        // values
+        let (row_left, row_right) = if [left, right]
+            .iter()
+            .any(|bracket| matches!(*bracket, "" | "|" | "||"))
+        {
+            ("(", ")")
+        } else {
+            (left, right)
+        };
         out.write_str(left)?;
         for (i, row) in matrix.rows().enumerate() {
             if i > 0 {
                 out.write_char(',')?;
             }
-            out.write_str(left)?;
+            out.write_str(row_left)?;
             for (j, expr) in row.iter().enumerate() {
                 let rules = column_rules(matrix, j);
                 if j > 0 && rules == 0 {
@@ -700,7 +895,7 @@ impl Conf {
             for _ in 0..column_rules(matrix, row.len()) {
                 out.write_char('|')?;
             }
-            out.write_str(right)?;
+            out.write_str(row_right)?;
         }
         out.write_str(right)
     }
@@ -726,7 +921,7 @@ impl Conf {
             match simple {
                 Simple::Missing => Ok(()),
                 &Simple::Number(num) => out.write_str(num),
-                &Simple::Text(text) => out.write_str(text),
+                &Simple::Text(text) => Self::inline_text(text, out),
                 &Simple::Ident(ident) | &Simple::Operator(ident) => out.write_str(ident),
                 &Simple::Symbol(Symbol { text, .. }) | &Simple::Sign(text) => {
                     out.write_str(symbol_str(text, self.skin_tone))
@@ -742,6 +937,20 @@ impl Conf {
                 Simple::Matrix(matrix) => self.inline_matrix(matrix, out),
             }
         }
+    }
+
+    /// Write quoted `text`, each control char that isn't whitespace, which a terminal would act
+    /// on rather than show, as `�`
+    fn inline_text(text: &str, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
+        let mut pieces = text.split(|chr: char| chr.is_control() && !chr.is_whitespace());
+        if let Some(first) = pieces.next() {
+            out.write_str(first)?;
+        }
+        for piece in pieces {
+            out.write_char(char::REPLACEMENT_CHARACTER)?;
+            out.write_str(piece)?;
+        }
+        Ok(())
     }
 
     /// Render a simple, stripping surrounding brackets when `strip_brackets` is on.
@@ -889,6 +1098,7 @@ impl Conf {
         self,
         numer: &impl Operand<'a>,
         denom: &impl Operand<'a>,
+        font: Font,
     ) -> Option<String> {
         let mut signs = String::new();
         let mut unsigned = numer;
@@ -900,6 +1110,7 @@ impl Conf {
             unsigned.as_simple()?,
             denom.as_simple()?,
             self.strip_brackets,
+            |text| font.leaves(text),
         )?;
         signs.push(frac);
         Some(signs)
@@ -913,31 +1124,30 @@ impl Conf {
         denom: &impl Operand<'a>,
         out: &Mapper<impl fmt::Write>,
     ) -> Option<String> {
-        let numer_simple = numer.as_simple();
         if self.vulgar_fracs
-            && let Some(frac) = self.signed_vulgar_frac(numer, denom)
+            && let Some(frac) = self.signed_vulgar_frac(numer, denom, out.conf.font)
         {
             out.mapped_str(&frac)
-        } else if self.vulgar_fracs
-            && self.script_fracs()
-            && matches!(
-                numer_simple.map(|num| self.unwrap_single(num)),
-                Some(num!("1"))
-            )
-            && !denom.is_negated()
-            && let Some(sub_conf) = out.conf.with_sub()
-            && let Some(marker) = out.mapped_char('⅟')
-            && let Some(lower) = self.mapped_operand(denom, sub_conf)
-        {
-            Some(marker + &lower)
         } else if self.script_fracs()
-            && let Some(sup_conf) = out.conf.with_sup()
-            && let Some(upper) = self.mapped_operand(numer, sup_conf)
             && let Some(sub_conf) = out.conf.with_sub()
-            && let Some(slash) = out.mapped_char('⁄')
             && let Some(lower) = self.mapped_operand(denom, sub_conf)
         {
-            Some(upper + &slash + &lower)
+            // a styled 1 has no place in `⅟`
+            if self.vulgar_fracs
+                && matches!(
+                    numer.as_simple().map(|num| self.unwrap_single(num)),
+                    Some(num!("1"))
+                )
+                && out.conf.font.leaves("1")
+                && !denom.is_negated()
+                && let Some(marker) = out.mapped_char('⅟')
+            {
+                Some(marker + &lower)
+            } else {
+                let upper = self.mapped_operand(numer, out.conf.with_sup()?)?;
+                let slash = out.mapped_char('⁄')?;
+                Some(upper + &slash + &lower)
+            }
         } else {
             None
         }
@@ -1206,7 +1416,7 @@ mod tests {
         assert_eq!(res, "xˢⁱⁿ\u{2009}ˣ");
 
         let res = super::super::parse_unicode("x^vec(x)").to_string();
-        assert_eq!(res, "x^x\u{20D7}");
+        assert_eq!(res, "xˣ\u{20D7}");
 
         let res = super::super::parse_unicode("x_x^y").to_string();
         assert_eq!(res, "xₓʸ");
@@ -1249,11 +1459,31 @@ mod tests {
     }
 
     #[test]
+    fn control_chars_in_text_are_replaced() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("\"a\u{1b}b\u{1}c\u{7f}d\u{9b}e\""), "a�b�c�d�e");
+        // whitespace stays as typed
+        assert_eq!(render("\"a\tb\nc\u{85}d\""), "a\tb\nc\u{85}d");
+        assert_eq!(render("bb \"x\u{1}\""), "𝐱�");
+    }
+
+    #[test]
     fn matrix() {
         let opts = Conf::default();
 
         let res = opts.parse("[ [x, y], [a, b] ]").to_string();
         assert_eq!(res, "[[x,y],[a,b]]");
+    }
+
+    #[test]
+    fn matrix_rows_without_a_bracket_to_repeat() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("{(a, if x),(b, else):}"), "{(a,if x),(b,else)");
+        assert_eq!(render("{[a,b],[c,d]:}"), "{(a,b),(c,d)");
+        assert_eq!(render("{:(a,b),(c,d):}"), "(a,b),(c,d)");
+        assert_eq!(render("|(a,b),(c,d)|"), "|(a,b),(c,d)|");
+        assert_eq!(render("||(a,b),(c,d)||"), "||(a,b),(c,d)||");
+        assert_eq!(render("<<(a,b),(c,d)>>"), "⟨⟨a,b⟩,⟨c,d⟩⟩");
     }
 
     #[test]
@@ -1525,6 +1755,17 @@ mod tests {
     }
 
     #[test]
+    fn a_styled_letter_without_a_script_form_is_not_raised() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("x^(bbb R)"), "x^(ℝ)");
+        assert_eq!(render("x^bb x"), "x^𝐱");
+        assert_eq!(render("1/(bb x)"), "1/(𝐱)");
+        assert_eq!(render("bb(x^2)"), "𝐱^𝟐");
+        // a font that leaves a char alone keeps its script form
+        assert_eq!(render("bb(x^+)"), "𝐱⁺");
+    }
+
+    #[test]
     fn bare_function_has_no_trailing_space() {
         // `f` and `g` are function tokens; with no argument they render as just the name
         let render = |inp: &str| super::super::parse_unicode(inp).to_string();
@@ -1542,16 +1783,165 @@ mod tests {
 
     #[test]
     #[allow(clippy::unicode_not_nfc)]
-    fn nested_font_not_reapplied() {
-        // an inner font wins and must not be re-applied by an outer font when the
-        // modifier/cover retry path emits the already-styled character.
+    fn nested_fonts_combine() {
         let render = |inp: &str| super::super::parse_unicode(inp).to_string();
-        assert_eq!(render("cc(bb x)"), "\u{1d431}"); // bold x, inner font wins
-        assert_eq!(render("hat(bb x)"), "\u{1d431}\u{0302}"); // bold x + combining hat
-        // char-modifier retry: outer cal must not re-map the bold x
-        assert_eq!(render("cc(hat(bb x))"), "\u{1d431}\u{0302}");
-        // cover retry: same, with an overset combining mark
-        assert_eq!(render("cc(overset(a)(bb x))"), "\u{1d431}\u{0363}");
+        assert_eq!(render("bb(it x)"), "𝒙");
+        assert_eq!(render("it(bb x)"), "𝒙");
+        assert_eq!(render("bbit(x)"), "𝒙");
+        assert_eq!(render("bb(bbit x)"), "𝒙");
+        assert_eq!(render("cc(bb x)"), "\u{1d501}"); // bold script x
+        assert_eq!(render("hat(bb x)"), "\u{1d431}\u{0302}");
+        assert_eq!(render("cc(hat(bb x))"), "\u{1d501}\u{0302}");
+        assert_eq!(render("cc(overset(a)(bb x))"), "\u{1d501}\u{0363}");
+    }
+
+    #[test]
+    fn a_fraction_keeps_its_font() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("bb(1/2)"), "𝟏/𝟐");
+        assert_eq!(render("bb(1/x)"), "𝟏/𝐱");
+        assert_eq!(render("bb(-1/2)"), "-𝟏/𝟐");
+        // a font that leaves the digits alone keeps the fraction char
+        assert_eq!(render("cc(1/2)"), "½");
+        assert_eq!(render("cc(1/3)"), "⅓");
+        let plain = Conf::default().with_vulgar_fracs(false);
+        assert_eq!(plain.parse("bb(1/2)").to_string(), "𝟏/𝟐");
+    }
+
+    #[test]
+    fn deeply_nested_marks_render_quickly() {
+        let nested = |open: &str, close: &str| {
+            let depth = 40;
+            format!("{}x{}", open.repeat(depth), close.repeat(depth))
+        };
+        let start = std::time::Instant::now();
+        for (open, close) in [
+            ("hat(", ")"),
+            ("bar(", ")"),
+            ("overset(a)(", ")"),
+            ("stackrel(", ")(=)"),
+        ] {
+            super::super::parse_unicode(&nested(open, close)).to_string();
+        }
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    #[allow(clippy::unicode_not_nfc)]
+    fn a_mark_under_a_line_still_sits_on_its_char() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("cancel(hat x)"), "x\u{0302}\u{0336}");
+        assert_eq!(render("bar(hat x)"), "x\u{0302}\u{0304}");
+        assert_eq!(render("ul(vec x)"), "x\u{20d7}\u{0332}");
+        assert_eq!(render("cancel(stackrel ? =)"), "\u{225f}\u{0336}");
+        assert_eq!(render("cancel(overset a x)"), "x\u{0363}\u{0336}");
+        // the command a mark can't sit on is lined like everything else
+        assert_eq!(
+            render("cancel(hat(xy))"),
+            "h\u{0336}a\u{0336}t\u{0336} (x\u{0336}y\u{0336})"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::unicode_not_nfc)]
+    fn a_mark_sits_on_a_char_that_already_has_marks() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("hat(dot q)"), "q\u{0307}\u{0302}");
+        assert_eq!(render("hat(dot x)"), "\u{1e8b}\u{0302}");
+        assert_eq!(render("hat(cancel x)"), "x\u{0336}\u{0302}");
+        assert_eq!(render("vec(ul x)"), "x\u{0332}\u{20d7}");
+        assert_eq!(render("overset(a)(hat q)"), "q\u{0302}\u{0363}");
+        assert_eq!(render("overset(a)(x)"), "x\u{0363}");
+        let dark = Conf {
+            skin_tone: SkinTone::Dark,
+            ..Default::default()
+        };
+        assert_eq!(dark.parse("hat :wave:").to_string(), "hat 👋🏿");
+    }
+
+    #[test]
+    fn no_line_goes_through_an_emoji() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        let dark = Conf {
+            skin_tone: SkinTone::Dark,
+            ..Default::default()
+        };
+        assert_eq!(dark.parse("cancel :wave:").to_string(), "cancel 👋🏿");
+        assert_eq!(
+            render("cancel :family_man_woman_boy:"),
+            "cancel 👨\u{200d}👩\u{200d}👦"
+        );
+        assert_eq!(render("ul :heart:"), "ul ❤\u{fe0f}");
+        assert_eq!(render("cancel :us:"), "cancel 🇺🇸");
+        assert_eq!(
+            render("cancel :england:"),
+            "cancel 🏴\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}"
+        );
+        assert_eq!(render("overline :one:"), "overline 1\u{fe0f}\u{20e3}");
+        assert_eq!(render("cancel( :us: x)"), "cancel (🇺🇸x)");
+        assert_eq!(render("bar( :us: x)"), "bar (🇺🇸x)");
+        assert_eq!(render("ul(cancel :us:)"), "ul (cancel 🇺🇸)");
+        assert_eq!(render("cancel(x y)"), "x\u{0336}y\u{0336}");
+    }
+
+    #[test]
+    fn no_mark_sits_on_an_emoji() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        let dark = Conf {
+            skin_tone: SkinTone::Dark,
+            ..Default::default()
+        };
+        assert_eq!(render("hat 🇦🇨"), "hat 🇦🇨");
+        assert_eq!(render("hat :us:"), "hat 🇺🇸");
+        assert_eq!(render("dot 😶\u{200d}🌫\u{fe0f}"), "dot 😶\u{200d}🌫\u{fe0f}");
+        assert_eq!(
+            render("vec :family_man_woman_boy:"),
+            "vec 👨\u{200d}👩\u{200d}👦"
+        );
+        assert_eq!(dark.parse("tilde :wave:").to_string(), "tilde 👋🏿");
+        assert_eq!(render("hat 👋🏽"), "hat 👋🏽");
+        assert_eq!(render("ddot :one:"), "ddot 1\u{fe0f}\u{20e3}");
+        assert_eq!(render("hat :heart:"), "hat ❤\u{fe0f}");
+        assert_eq!(render("bar :us:"), "bar 🇺🇸");
+        assert_eq!(render("overset(a) :us:"), "🇺🇸ᵃ");
+        assert_eq!(render("hat( :us: x)"), "hat (🇺🇸x)");
+    }
+
+    #[test]
+    #[allow(clippy::unicode_not_nfc)]
+    fn a_mark_still_sits_on_a_symbol_drawn_as_text() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("hat ->"), "→\u{0302}");
+        assert_eq!(render("vec <->"), "↔\u{20d7}");
+        assert_eq!(render("hat sum"), "∑\u{0302}");
+        assert_eq!(render("hat ❤"), "❤\u{0302}");
+        assert_eq!(render("tilde \"한\""), "한\u{0303}");
+        assert_eq!(render("cancel <->"), "↔\u{0336}");
+    }
+
+    #[test]
+    #[allow(clippy::unicode_not_nfc)]
+    fn a_styled_char_keeps_its_font_under_a_mark() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("bb(hat a)"), "\u{1d41a}\u{0302}");
+        assert_eq!(render("bb(hat q)"), "\u{1d42a}\u{0302}");
+        assert_eq!(render("bb(dot x)"), "\u{1d431}\u{0307}");
+        assert_eq!(render("bbb(tilde n)"), "\u{1d55f}\u{0303}");
+        assert_eq!(render("cc(ddot A)"), "\u{1d49c}\u{0308}");
+        // an unstyled char still takes its precomposed form
+        assert_eq!(render("hat a"), "â");
+        assert_eq!(render("ddot iota"), "ϊ");
+    }
+
+    #[test]
+    #[allow(clippy::unicode_not_nfc)]
+    fn a_mark_sits_on_a_raised_or_lowered_char() {
+        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        assert_eq!(render("x_(overline a)"), "xₐ\u{0305}");
+        assert_eq!(render("x_(bar a)"), "xₐ\u{0304}");
+        assert_eq!(render("x^hat a"), "xᵃ\u{0302}");
+        assert_eq!(render("x^vec x"), "xˣ\u{20d7}");
+        assert_eq!(render("x^overset(a)(x)"), "xˣ\u{0363}");
     }
 
     #[test]
@@ -1585,6 +1975,12 @@ mod tests {
         assert_eq!(render("overline(x)"), "x\u{0305}");
         assert_eq!(render("underline(x)"), "x\u{0332}");
         assert_eq!(render("cancel(x)"), "x\u{0336}");
+        // nested lines all stay, innermost nearest the char, and none is drawn twice
+        assert_eq!(render("cancel(overline x)"), "x\u{0305}\u{0336}");
+        assert_eq!(render("ul(cancel x)"), "x\u{0336}\u{0332}");
+        assert_eq!(render("cancel(cancel x)"), "x\u{0336}");
+        assert_eq!(render("ul(bar(xy))"), "x\u{0305}\u{0332}y\u{0305}\u{0332}");
+        assert_eq!(render("bar(bar(xy))"), "x\u{0305}y\u{0305}");
     }
 
     #[test]

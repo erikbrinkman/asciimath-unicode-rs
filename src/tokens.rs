@@ -5,6 +5,7 @@ use asciimath_parser::prefix_map::HashPrefixMap;
 use asciimath_parser::tree::Expression;
 use asciimath_parser::{SymbolClass, Token, Tokenizer};
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::sync::LazyLock;
 
 macro_rules! tokens {
@@ -488,6 +489,26 @@ pub fn right_bracket_str(inp: &str) -> &str {
         "||" => "||",
         _ => unreachable!("matches all valid right bracket strs"),
     }
+}
+
+/// The chars of every bracket's form
+static BRACKET_CHARS: LazyLock<HashSet<char>> = LazyLock::new(|| {
+    asciimath_parser::ASCIIMATH_TOKENS
+        .into_iter()
+        .flat_map(|(spelling, token)| {
+            match token {
+                Token::OpenBracket | Token::OpenCloseBracket => left_bracket_str(spelling),
+                Token::CloseBracket => right_bracket_str(spelling),
+                _ => "",
+            }
+            .chars()
+        })
+        .collect()
+});
+
+/// Whether `chr` is part of a bracket
+pub fn is_bracket_char(chr: char) -> bool {
+    BRACKET_CHARS.contains(&chr)
 }
 
 #[inline]

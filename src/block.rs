@@ -8,7 +8,7 @@ use super::ast::{
     frac_edges, func_hugs_argument, hugs_argument, inter_is_spaced_op, name_without_argument,
     needs_space, scriptfunc_edges,
 };
-use super::inline::{Mapper, MapperConf, Operand, column_rules};
+use super::inline::{Font, Mapper, MapperConf, Operand, column_rules};
 use super::tokens::{left_bracket_str, right_bracket_str, subscript_char, superscript_char};
 
 use asciimath_parser::tree::{
@@ -501,7 +501,8 @@ impl Conf {
         denom: &impl Operand<'a>,
     ) -> Option<Block> {
         if self.vulgar_fracs {
-            self.signed_vulgar_frac(numer, denom).map(Block::text)
+            self.signed_vulgar_frac(numer, denom, Font::default())
+                .map(Block::text)
         } else {
             None
         }
