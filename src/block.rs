@@ -958,6 +958,15 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unicode_not_nfc)]
+    fn a_typed_glyph_of_several_characters_stays_whole() {
+        assert_eq!(render_block("🇺🇸/2"), "🇺🇸\n──\n 2");
+        assert_eq!(render_block("👋🏿/2"), "👋🏿\n──\n 2");
+        assert_eq!(render_block("e\u{301}/2"), "e\u{301}\n─\n2");
+        assert_eq!(render_block("x^(e\u{301})"), " e\u{301}\nx");
+    }
+
+    #[test]
     fn stacked_frac_with_expressions() {
         assert_eq!(render_block_conf("(x+1)/y", stacked()), "x+1\n───\n y");
     }

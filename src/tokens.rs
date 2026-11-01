@@ -3,176 +3,37 @@
 use super::SkinTone;
 use asciimath_parser::prefix_map::HashPrefixMap;
 use asciimath_parser::tree::Expression;
-use asciimath_parser::{SymbolClass, Token, Tokenizer};
+use asciimath_parser::{ASCIIMATH_TOKENS, SymbolClass, Token, Tokenizer, asciimath_spellings};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
-macro_rules! tokens {
-    ($($token:expr => $($name:literal $(=> $unicode:literal)?),+;)+) => {
-        [
-            $(
-                $(
-                    ($name, $token, tokens!(@unicode $name $(, $unicode)?)),
-                )+
-            )+
-        ]
-    };
-    (@unicode $name:literal) => {
-        $name
-    };
-    (@unicode $name:literal, $unicode:literal) => {
-        $unicode
-    };
-}
-
-/// Every token by name, with its unicode form
-static UNICODE_TOKENS: [(&str, Token, &str); 432] = {
-    use SymbolClass::{Glyph, Joining, JoiningName, Leading, LeadingName, Name, Space};
-    use Token::{
-        Binary, CloseBracket, Frac, Function, OpenBracket, OpenCloseBracket, Sep, Sign, Sub, Super,
-        Symbol, Unary,
-    };
-
-    tokens!(
-        Frac => "/";
-        Super => "^";
-        Sub => "_";
-        Sep => ",";
-        Sign => "+", "-", "+-" => "±", "pm" => "±", "±", "-+" => "∓", "mp" => "∓", "∓";
-        Function => "sin", "cos", "tan", "sinh", "cosh", "tanh", "cot", "sec", "csc", "arcsin",
-            "arccos", "arctan", "coth", "sech", "csch", "exp", "log", "ln", "det", "gcd", "lcm",
-            "Sin", "Cos", "Tan", "Arcsin", "Arccos", "Arctan", "Sinh", "Cosh", "Tanh", "Cot", "Sec",
-            "Csc", "Log", "Ln", "f", "g", "arcsec", "arccsc", "arccot";
-        Unary => "sqrt", "abs", "norm", "floor", "ceil", "Abs", "hat", "bar", "overline", "vec",
-            "dot", "ddot", "overarc", "overparen", "ul", "underline", "ubrace", "underbrace",
-            "obrace", "overbrace", "text", "mbox", "cancel", "tilde";
-        Unary => "bb", "mathbf", "sf", "mathsf", "bbb", "mathbb", "cc", "mathcal", "tt", "mathtt",
-            "fr", "mathfrak", "it", "mathit", "italic", "bold", "bbit", "bbsf", "sfit", "bbsfit",
-            "bbcc", "bbfr";
-        Binary => "frac", "root", "stackrel", "overset", "underset", "color", "id", "class";
-        Symbol(Glyph) => "alpha" => "α", "Alpha" => "Α", "beta" => "β", "Beta" => "Β", "chi" => "χ",
-            "Chi" => "Χ", "delta" => "δ", "Delta" => "Δ", "epsi" => "ε", "Epsi" => "Ε",
-            "epsilon" => "ε", "Epsilon" => "Ε", "varepsilon" => "ϵ", "eta" => "η", "Eta" => "Η",
-            "gamma" => "γ", "Gamma" => "Γ", "iota" => "ι", "Iota" => "Ι", "kappa" => "κ",
-            "Kappa" => "Κ", "varkappa" => "ϰ", "lambda" => "λ", "Lambda" => "Λ", "lamda" => "λ",
-            "Lamda" => "Λ", "mu" => "μ", "Mu" => "Μ", "nu" => "ν", "Nu" => "Ν", "omega" => "ω",
-            "Omega" => "Ω", "phi" => "φ", "varphi" => "ϕ", "Phi" => "Φ", "pi" => "π", "Pi" => "Π",
-            "varpi" => "ϖ", "psi" => "ψ", "Psi" => "Ψ", "rho" => "ρ", "Rho" => "Ρ", "varrho" => "ϱ",
-            "sigma" => "σ", "Sigma" => "Σ", "tau" => "τ", "Tau" => "Τ", "theta" => "θ",
-            "vartheta" => "ϑ", "Theta" => "Θ", "Vartheta" => "ϴ", "upsilon" => "υ",
-            "Upsilon" => "Υ", "xi" => "ξ", "Xi" => "Ξ", "zeta" => "ζ", "Zeta" => "Ζ";
-        Symbol(Joining) => "*" => "⋅", "cdot" => "⋅", "**" => "∗", "ast" => "∗", "***" => "⋆",
-            "star" => "⋆", "//" => "/", "\\\\" => "\\", "backslash" => "\\", "setminus" => "\\",
-            "xx" => "×", "times" => "×", "|><" => "⋉", "ltimes" => "⋉", "><|" => "⋊",
-            "rtimes" => "⋊", "|><|" => "⋈", "bowtie" => "⋈", "-:" => "÷", "div" => "÷",
-            "divide" => "÷", "@" => "∘", "circ" => "∘", "o+" => "⊕", "oplus" => "⊕", "ox" => "⊗",
-            "otimes" => "⊗", "o." => "⊙", "odot" => "⊙", "^^" => "∧", "wedge" => "∧", "land" => "∧",
-            "vv" => "∨", "vee" => "∨", "lor" => "∨", "nn" => "∩", "cap" => "∩", "uu" => "∪",
-            "cup" => "∪", "ominus" => "⊖", "o-" => "⊖", "oslash" => "⊘", "dag" => "†",
-            "dagger" => "†", "ddag" => "‡", "ddagger" => "‡";
-        // big operations, which want the operand after them
-        Symbol(Leading) => "sum" => "∑", "prod" => "∏", "^^^" => "⋀", "bigwedge" => "⋀",
-            "vvv" => "⋁", "bigvee" => "⋁", "nnn" => "⋂", "bigcap" => "⋂", "uuu" => "⋃",
-            "bigcup" => "⋃";
-        Symbol(Joining) => "=", "!=" => "≠", "ne" => "≠", ":=", "<", "lt" => "<", "<=" => "≤",
-            "le" => "≤", "lt=" => "≤", "leq" => "≤", ">", "gt" => ">", "mlt" => "≪", "ll" => "≪",
-            ">=" => "≥", "ge" => "≥", "gt=" => "≥", "geq" => "≥", "mgt" => "≫", "gg" => "≫",
-            "-<" => "≺", "prec" => "≺", "-lt" => "≺", ">-" => "≻", "succ" => "≻", "-<=" => "⪯",
-            "preceq" => "⪯", ">-=" => "⪰", "succeq" => "⪰", "in" => "∈", "!in" => "∉",
-            "notin" => "∉", "sub" => "⊂", "subset" => "⊂", "sup" => "⊃", "supset" => "⊃",
-            "sube" => "⊆", "subseteq" => "⊆", "supe" => "⊇", "supseteq" => "⊇", "!sub" => "⊄",
-            "nsub" => "⊄", "notsubset" => "⊄", "!sup" => "⊅", "nsup" => "⊅", "notsupset" => "⊅",
-            "!sube" => "⊈", "nsubseteq" => "⊈", "notsubseteq" => "⊈", "!supe" => "⊉",
-            "nsupseteq" => "⊉", "notsupseteq" => "⊉", "-=" => "≡", "equiv" => "≡", "!-=" => "≢",
-            "notequiv" => "≢", "~=" => "≅", "cong" => "≅", "~~" => "≈", "approx" => "≈", "~" => "∼",
-            "sim" => "∼", "prop" => "∝", "propto" => "∝";
-        Symbol(Joining) => "=>" => "⇒", "implies" => "⇒", "<=>" => "⇔", "iff" => "⇔",
-            "|--" => "⊢", "vdash" => "⊢", "|==" => "⊨", "models" => "⊨";
-        // negation and the quantifiers, which want the operand after them
-        Symbol(Leading) => "not" => "¬", "neg" => "¬", "AA" => "∀", "forall" => "∀", "EE" => "∃",
-            "exists" => "∃", "!EE" => "∄", "notexists" => "∄";
-        Symbol(Glyph) => "_|_" => "⊥", "bot" => "⊥", "TT" => "⊤", "top" => "⊤";
-        Symbol(JoiningName) => "and", "or", "if";
-        Symbol(Joining) => ":|:" => "|", ":." => "∴", "therefore" => "∴", ":'" => "∵",
-            "because" => "∵", "diamond" => "⋄", "frown" => "⌢";
-        Symbol(Leading) => "int" => "∫", "oint" => "∮", "iint" => "∬", "iiint" => "∭",
-            "oiint" => "∯", "oiiint" => "∰";
-        Symbol(Space) => "\\ " => " ", "quad" => "\u{2003}", "qquad" => "\u{2003}\u{2003}",
-            "enspace" => "\u{2002}", "thinspace" => "\u{2009}";
-        // not asciimath symbols, but each completes the operand before it, so a sign after joins
-        Symbol(Glyph) => "!", "%";
-        Symbol(Glyph) => "del" => "∂", "partial" => "∂", "grad" => "∇", "nabla" => "∇", "O/" => "∅",
-            "emptyset" => "∅", "oo" => "∞", "infty" => "∞", "aleph" => "ℵ", "..." => "…",
-            "ldots" => "…", "/_" => "∠", "angle" => "∠", "/_\\" => "△", "triangle" => "△",
-            "'" => "′", "prime" => "′", "cdots" => "⋯", "vdots" => "⋮", "ddots" => "⋱",
-            "square" => "□", "CC" => "ℂ", "NN" => "ℕ", "QQ" => "ℚ", "RR" => "ℝ", "ZZ" => "ℤ",
-            "ell" => "ℓ", "hbar" => "ℏ";
-        Symbol(Joining) => "uarr" => "↑", "uparrow" => "↑", "uArr" => "⇑", "Uparrow" => "⇑",
-            "darr" => "↓", "downarrow" => "↓", "dArr" => "⇓", "Downarrow" => "⇓", "rarr" => "→",
-            "rightarrow" => "→", "->" => "→", "to" => "→", ">->" => "↣", "rightarrowtail" => "↣",
-            "->>" => "↠", "twoheadrightarrow" => "↠", ">->>" => "⤖", "twoheadrightarrowtail" => "⤖",
-            "|->" => "↦", "mapsto" => "↦", "larr" => "←", "leftarrow" => "←", "<-" => "←",
-            "harr" => "↔", "leftrightarrow" => "↔", "<->" => "↔", "rArr" => "⇒",
-            "Rightarrow" => "⇒", "==>" => "⇒", "lArr" => "⇐", "Leftarrow" => "⇐", "<==" => "⇐",
-            "hArr" => "⇔", "Leftrightarrow" => "⇔", "<==>" => "⇔", "rightleftharpoons" => "⇌";
-        OpenBracket => "(", "[", "{", "|:" => "|", "(:" => "⟨", "<<" => "⟨", "langle" => "⟨",
-            "left(" => "(", "left[" => "[", "{:" => "", "|__" => "⌊", "lfloor" => "⌊", "|~" => "⌈",
-            "lceiling" => "⌈";
-        CloseBracket => ")", "]", "}", ":|" => "|", ":)" => "⟩", ">>" => "⟩", "rangle" => "⟩",
-            "right)" => ")", "right]" => "]", ":}" => "", "__|" => "⌋", "rfloor" => "⌋",
-            "~|" => "⌉", "rceiling" => "⌉";
-        OpenCloseBracket => "|", "||";
-        Symbol(Name) => "dx", "dy", "dz", "dt";
-        Symbol(LeadingName) => "lim", "Lim", "dim", "lub", "glb", "min", "max";
-        Symbol(JoiningName) => "mod";
-    )
-};
-
-/// Every token the tokenizer knows by name, emoji shortcodes included
-pub(crate) static TOKEN_MAP: LazyLock<HashPrefixMap<Cow<'static, str>, Token>> =
-    LazyLock::new(|| {
-        UNICODE_TOKENS
-            .iter()
-            .map(|&(name, tok, _)| (Cow::Borrowed(name), tok))
-            .chain(emojis::iter().flat_map(|emoji| {
-                emoji.shortcodes().map(|code| {
-                    (
-                        Cow::Owned(format!(":{code}:")),
-                        Token::Symbol(SymbolClass::Glyph),
-                    )
-                })
-            }))
-            .collect()
-    });
-
-/// Each token's unicode form, by its name
-static UNICODE_STRS: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
-    UNICODE_TOKENS
-        .iter()
-        .map(|&(name, _, unicode)| (name, unicode))
+/// Every spelling the tokenizer knows: the parser's and emoji shortcodes
+static TOKEN_MAP: LazyLock<HashPrefixMap<Cow<'static, str>, Token>> = LazyLock::new(|| {
+    asciimath_spellings()
+        .map(|(spelling, token)| (Cow::Borrowed(spelling), token))
+        .chain(emojis::iter().flat_map(|emoji| {
+            emoji.shortcodes().map(|code| {
+                (
+                    Cow::Owned(format!(":{code}:")),
+                    Token::Symbol(SymbolClass::Glyph),
+                )
+            })
+        }))
         .collect()
 });
 
-/// The class of each symbol by its unicode form, for characters typed in that form
-static UNICODE_CLASSES: LazyLock<HashMap<&str, SymbolClass>> = LazyLock::new(|| {
-    UNICODE_TOKENS
+/// The unicode form of each spelling that renders as something other than typed
+static UNICODE_FORMS: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
+    ASCIIMATH_TOKENS
         .iter()
-        .filter_map(|&(_, tok, unicode)| match tok {
-            Token::Symbol(class) => Some((unicode, class)),
-            _ => None,
-        })
+        .filter_map(|entry| entry.unicode.map(|unicode| (entry.spelling, unicode)))
         .collect()
 });
-
-/// The class of the symbol whose unicode form is `raw`, if any symbol has it
-pub(crate) fn raw_class(raw: &str) -> Option<SymbolClass> {
-    UNICODE_CLASSES.get(raw).copied()
-}
 
 /// The unicode form of a symbol, or of an emoji shortcode in the given skin tone
 pub(crate) fn symbol_str(inp: &str, skin_tone: SkinTone) -> &str {
-    if let Some(unicode) = UNICODE_STRS.get(inp) {
+    if let Some(unicode) = UNICODE_FORMS.get(inp) {
         unicode
     } else {
         inp.strip_prefix(':')
@@ -217,20 +78,20 @@ fn first_tone(skin_tone: SkinTone) -> SkinTone {
 
 /// The unicode form of a bracket, empty for an invisible one
 pub(crate) fn bracket_str(inp: &str) -> &str {
-    UNICODE_STRS.get(inp).copied().unwrap_or(inp)
+    UNICODE_FORMS.get(inp).copied().unwrap_or(inp)
 }
 
-/// The chars of every bracket's unicode form
+/// The chars of the unicode form of every bracket in the parser's table
 static BRACKET_CHARS: LazyLock<HashSet<char>> = LazyLock::new(|| {
-    UNICODE_TOKENS
+    ASCIIMATH_TOKENS
         .iter()
-        .filter(|(_, token, _)| {
+        .filter(|entry| {
             matches!(
-                token,
+                entry.token,
                 Token::OpenBracket | Token::CloseBracket | Token::OpenCloseBracket
             )
         })
-        .flat_map(|(_, _, unicode)| unicode.chars())
+        .flat_map(|entry| entry.unicode.unwrap_or(entry.spelling).chars())
         .collect()
 });
 
@@ -561,20 +422,21 @@ pub(crate) fn parse(inp: &str, keep_spaces: bool) -> Expression<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SkinTone, SymbolClass, Token, UNICODE_TOKENS};
-    use std::collections::{HashMap, HashSet};
+    use super::{ASCIIMATH_TOKENS, SkinTone, Token};
+    use std::collections::HashSet;
 
     #[test]
     fn mapping() {
         // the tokens whose unicode form is the token itself
-        const WRITTEN_AS_TYPED: [&str; 22] = [
-            "/", "^", "_", ",", "+", "-", "±", "∓", "=", ":=", "<", ">", "!", "%", "(", "[", "{",
-            ")", "]", "}", "|", "||",
+        const WRITTEN_AS_TYPED: [&str; 21] = [
+            "/", "^", "_", ",", "+", "-", "−", "=", ":=", "<", ">", "!", "%", "(", "[", "{", ")",
+            "]", "}", "|", "||",
         ];
-        for &(string, tok, unicode) in &UNICODE_TOKENS {
-            match tok {
+        for entry in &ASCIIMATH_TOKENS {
+            let string = entry.spelling;
+            match entry.token {
                 Token::Symbol(class) if class.is_name() => assert_eq!(
-                    unicode, string,
+                    entry.unicode, None,
                     "{string:?} is written as letters but renders as something else"
                 ),
                 Token::OpenBracket
@@ -586,47 +448,12 @@ mod tests {
                 | Token::Super
                 | Token::Sub
                 | Token::Sep => assert!(
-                    unicode != string || WRITTEN_AS_TYPED.contains(&string),
+                    entry.unicode.is_some() || WRITTEN_AS_TYPED.contains(&string),
                     "{string:?} has no unicode form"
                 ),
                 _ => {}
             }
         }
-    }
-
-    #[test]
-    fn classes_agree_with_the_parser() {
-        // the symbols classed differently here on purpose, each with the reason why
-        const DELIBERATE: [(&str, &str); 0] = [];
-
-        let parsed: HashMap<&str, Token> = asciimath_parser::ASCIIMATH_TOKENS.into_iter().collect();
-        for &(string, tok, _) in &UNICODE_TOKENS {
-            // a symbol only this crate knows has nothing to agree with
-            if let Some(&other) = parsed.get(string)
-                && !DELIBERATE.iter().any(|&(name, _)| name == string)
-            {
-                assert_eq!(
-                    tok, other,
-                    "{string:?} is {tok:?} here and {other:?} in the parser"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn unicode_forms_have_one_class() {
-        let mut classes: HashMap<&str, (&str, SymbolClass)> = HashMap::new();
-        for &(string, tok, unicode) in &UNICODE_TOKENS {
-            let Token::Symbol(class) = tok else { continue };
-            let &mut (other, other_class) = classes.entry(unicode).or_insert((string, class));
-            assert_eq!(
-                class, other_class,
-                "{string:?} and {other:?} both render as {unicode:?} but differ in class"
-            );
-        }
-        assert_eq!(super::raw_class("⊂"), Some(SymbolClass::Joining));
-        assert_eq!(super::raw_class("∀"), Some(SymbolClass::Leading));
-        assert_eq!(super::raw_class("≠≤"), None);
     }
 
     #[test]

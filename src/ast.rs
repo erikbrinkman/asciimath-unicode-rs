@@ -1,6 +1,6 @@
 //! What both layouts ask of the parsed math
 
-use super::tokens::{bracket_str, raw_class};
+use super::tokens::bracket_str;
 
 use asciimath_parser::SymbolClass;
 use asciimath_parser::tree::{
@@ -124,11 +124,10 @@ pub(crate) fn extract_vulgar_frac(
     }
 }
 
-/// The class of a symbol, or of a character typed in a symbol's unicode form
+/// The class of a symbol
 fn symbol_class(simple: &Simple<'_>) -> Option<SymbolClass> {
     match *simple {
         Simple::Symbol(Symbol { class, .. }) => Some(class),
-        Simple::Operator(raw) => raw_class(raw),
         _ => None,
     }
 }
