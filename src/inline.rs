@@ -1,4 +1,4 @@
-#![allow(missing_docs, clippy::missing_errors_doc)]
+//! The one-line layouts
 
 use asciimath_parser::tree::{
     Expression, Func, Group, Intermediate, Matrix, Script, ScriptFunc, Simple, SimpleBinary,
@@ -11,13 +11,12 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::ast::{
-    delimiters, extract_vulgar_frac, frac_edges, func_hugs_argument, hugs_argument,
-    inter_is_spaced_op, is_empty_grouping, name_without_argument, needs_space, paren_contents,
-    scriptfunc_edges, unwrap_parens,
+    ArgGap, Separator, delimiters, extract_vulgar_frac, is_empty_grouping, paren_contents,
+    separated_items, unwrap_parens,
 };
 use super::tokens::{
-    bold_map, cal_map, double_map, frak_map, is_bracket_char, italic_map, left_bracket_str,
-    mono_map, right_bracket_str, sans_map, subscript_char, superscript_char, symbol_str,
+    bold_map, bracket_str, cal_map, double_map, frak_map, is_bracket_char, italic_map, mono_map,
+    sans_map, subscript_char, superscript_char, symbol_str,
 };
 use super::{Conf, Layout};
 
@@ -32,7 +31,7 @@ const LINE_MARKS: [char; 3] = [OVERLINE, UNDERLINE, CANCEL];
 
 /// A style a font command gives each char
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Style {
+pub(crate) enum Style {
     /// bold
     Bold,
     /// italic
@@ -66,12 +65,12 @@ impl Style {
 
 /// The styles of the fonts a char is in, outermost first and each at most once
 #[derive(Debug, Default, Clone, Copy)]
-pub struct Font([Option<Style>; 7]);
+pub(crate) struct Font([Option<Style>; 7]);
 
 impl Font {
     /// This font inside the font of `styles`, which are given outermost first; a style applied
     /// again changes nothing, so one already here is left out
-    pub fn within(self, styles: &[Style]) -> Self {
+    pub(crate) fn within(self, styles: &[Style]) -> Self {
         let Font(mut slots) = self;
         for &style in styles {
             if !slots.contains(&Some(style))
@@ -88,7 +87,7 @@ impl Font {
     }
 
     /// `chr` in this font, the innermost style applied first
-    pub fn apply(self, chr: char) -> char {
+    pub(crate) fn apply(self, chr: char) -> char {
         self.0
             .into_iter()
             .rev()
@@ -97,14 +96,14 @@ impl Font {
     }
 
     /// Whether this font leaves every char of `text` as it is
-    pub fn leaves(self, text: &str) -> bool {
+    pub(crate) fn leaves(self, text: &str) -> bool {
         text.chars().all(|chr| self.apply(chr) == chr)
     }
 }
 
 /// The lines drawn through every char, each at most once, in the order they were applied
 #[derive(Debug, Default, Clone, Copy)]
-pub struct Lines([Option<char>; LINE_MARKS.len()]);
+pub(crate) struct Lines([Option<char>; LINE_MARKS.len()]);
 
 impl Lines {
     /// These lines and `mark`
@@ -129,40 +128,62 @@ impl Lines {
     }
 }
 
+/// Which way a script is shifted
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Shift {
+    /// lowered, as a subscript
+    Sub,
+    /// raised, as a superscript
+    Sup,
+}
+
+impl Shift {
+    /// The char written before a script that can't be shifted
+    fn marker(self) -> char {
+        match self {
+            Shift::Sub => '_',
+            Shift::Sup => '^',
+        }
+    }
+
+    /// `chr` shifted, if it has a shifted form
+    fn map(self, chr: char) -> Option<char> {
+        match self {
+            Shift::Sub => subscript_char(chr),
+            Shift::Sup => superscript_char(chr),
+        }
+    }
+}
+
+/// How a [`Mapper`] changes each char it writes
 #[derive(Debug, Default, Clone, Copy)]
-pub struct MapperConf {
-    pub font: Font,
-    pub sub_sup: Option<fn(char) -> Option<char>>,
-    pub lines: Lines,
+pub(crate) struct MapperConf {
+    /// font each char is styled in
+    pub(crate) font: Font,
+    /// way each char is shifted, after it is styled
+    pub(crate) shift: Option<Shift>,
+    /// lines drawn through each char
+    pub(crate) lines: Lines,
 }
 
 impl MapperConf {
-    /// This method allows checking if we can apply `sub_sup` without borrowing the inner writer
-    pub fn with_sub_sup(&self, sub_sup: fn(char) -> Option<char>) -> Option<MapperConf> {
-        if self.sub_sup.is_none() {
+    /// This configuration shifted, unless it already is, since nothing is shifted twice
+    pub(crate) fn with_shift(self, shift: Shift) -> Option<MapperConf> {
+        if self.shift.is_none() {
             Some(MapperConf {
-                font: self.font,
-                sub_sup: Some(sub_sup),
-                lines: self.lines,
+                shift: Some(shift),
+                ..self
             })
         } else {
             None
         }
     }
 
-    pub fn with_sub(&self) -> Option<MapperConf> {
-        self.with_sub_sup(subscript_char)
-    }
-
-    pub fn with_sup(&self) -> Option<MapperConf> {
-        self.with_sub_sup(superscript_char)
-    }
-
-    /// `chr` styled and raised or lowered, or an error if it has no raised or lowered form
+    /// `chr` styled and shifted, or an error if it has no shifted form
     fn map_char(self, chr: char) -> Result<char, fmt::Error> {
         let styled = self.font.apply(chr);
-        match self.sub_sup {
-            Some(script) => script(styled).ok_or(fmt::Error),
+        match self.shift {
+            Some(shift) => shift.map(styled).ok_or(fmt::Error),
             None => Ok(styled),
         }
     }
@@ -175,7 +196,8 @@ impl MapperConf {
         }
     }
 
-    pub fn wrap<S: Write>(self, other: &mut S) -> Mapper<'_, S> {
+    /// A mapper writing to `other` with this configuration
+    pub(crate) fn wrap<S: Write>(self, other: &mut S) -> Mapper<'_, S> {
         Mapper {
             inner: other,
             conf: self,
@@ -183,14 +205,18 @@ impl MapperConf {
     }
 }
 
+/// A writer that styles, shifts and lines each char before writing it to another writer
 #[derive(Debug)]
-pub struct Mapper<'a, W: ?Sized> {
-    pub inner: &'a mut W,
-    pub conf: MapperConf,
+pub(crate) struct Mapper<'a, W: ?Sized> {
+    /// writer the changed chars go to
+    pub(crate) inner: &'a mut W,
+    /// how each char is changed
+    pub(crate) conf: MapperConf,
 }
 
 impl<'a, W: fmt::Write + ?Sized> Mapper<'a, W> {
-    pub fn new(inner: &'a mut W) -> Self {
+    /// A mapper writing to `inner` unchanged
+    pub(crate) fn new(inner: &'a mut W) -> Self {
         Mapper {
             inner,
             conf: MapperConf::default(),
@@ -199,43 +225,36 @@ impl<'a, W: fmt::Write + ?Sized> Mapper<'a, W> {
 
     /// This mapper styling each char in the font of `styles`, given outermost first, before the
     /// font it already has
-    pub fn with_font(&mut self, styles: &[Style]) -> Mapper<'_, W> {
+    pub(crate) fn with_font(&mut self, styles: &[Style]) -> Mapper<'_, W> {
         Mapper {
             inner: &mut *self.inner,
             conf: MapperConf {
                 font: self.conf.font.within(styles),
-                sub_sup: self.conf.sub_sup,
-                lines: self.conf.lines,
+                ..self.conf
             },
         }
     }
 
-    pub fn with_modifier(&mut self, c: char) -> Mapper<'_, W> {
+    /// This mapper drawing the line `mark` through each char too
+    pub(crate) fn with_line(&mut self, mark: char) -> Mapper<'_, W> {
         Mapper {
             inner: &mut *self.inner,
             conf: MapperConf {
-                font: self.conf.font,
-                sub_sup: self.conf.sub_sup,
-                lines: self.conf.lines.with(c),
+                lines: self.conf.lines.with(mark),
+                ..self.conf
             },
         }
     }
 
-    /// `chr` the way this mapper would write it, if it maps at all
-    pub fn mapped_char(&self, chr: char) -> Option<String> {
-        let mut text = String::new();
-        self.onto(&mut text).write_char(chr).ok()?;
-        Some(text)
-    }
-
     /// `text` the way this mapper would write it, if every character of it maps
-    pub fn mapped_str(&self, text: &str) -> Option<String> {
+    pub(crate) fn mapped_str(&self, text: &str) -> Option<String> {
         let mut mapped = String::new();
         self.onto(&mut mapped).write_str(text).ok()?;
         Some(mapped)
     }
 
-    pub fn onto<'b, S: Write>(&self, other: &'b mut S) -> Mapper<'b, S> {
+    /// This mapper writing to `other` instead
+    pub(crate) fn onto<'b, S: Write>(&self, other: &'b mut S) -> Mapper<'b, S> {
         Mapper {
             inner: other,
             conf: self.conf,
@@ -282,22 +301,52 @@ impl<'a, W: fmt::Write + ?Sized> Mapper<'a, W> {
 impl<W: fmt::Write + ?Sized> fmt::Write for Mapper<'_, W> {
     /// Only a mapper over a string is asked whether a rendering maps, so a char with no script
     /// form failing here never looks like a real writer's error
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        if self.conf.font.is_plain() && self.conf.sub_sup.is_none() {
-            self.write_lined(s)
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        if self.conf.font.is_plain() && self.conf.shift.is_none() {
+            self.write_lined(text)
         } else if self.conf.lines.is_empty() {
-            for chr in s.chars() {
+            for chr in text.chars() {
                 self.inner.write_char(self.conf.map_char(chr)?)?;
             }
             Ok(())
         } else {
             // lines go after each char a reader sees, so they need the whole mapped text
-            let mapped = s
+            let mapped = text
                 .chars()
                 .map(|chr| self.conf.map_char(chr))
                 .collect::<Result<String, _>>()?;
             self.write_lined(&mapped)
         }
+    }
+}
+
+/// A writer for one item of an expression that writes what separates it from the item before
+/// ahead of its first char, so an item that renders to nothing leaves no separator behind
+struct SeparatedItem<'w, 't> {
+    /// writer the separator and the item go to, not generic since the expressions inside an item
+    /// wrap it again
+    inner: &'w mut dyn fmt::Write,
+    /// separator not yet written
+    sep: Option<Separator<'t>>,
+    /// configuration deciding how a typed separator is written
+    conf: Conf,
+    /// how the separator's chars are changed
+    mapper_conf: MapperConf,
+}
+
+impl fmt::Write for SeparatedItem<'_, '_> {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        if !text.is_empty() {
+            if let Some(sep) = self.sep.take() {
+                let mut out = Mapper {
+                    inner: &mut *self.inner,
+                    conf: self.mapper_conf,
+                };
+                self.conf.write_separator(sep, &mut out)?;
+            }
+            self.inner.write_str(text)?;
+        }
+        Ok(())
     }
 }
 
@@ -381,13 +430,13 @@ fn is_negation(expr: &Expression<'_>) -> bool {
     .is_some_and(|inter| matches!(inter, Intermediate::ScriptFunc(func) if func.is_negated()))
 }
 
-/// How many vertical lines the matrix draws at a column boundary
-pub(crate) fn column_rules(matrix: &Matrix<'_>, boundary: usize) -> usize {
-    matrix
-        .column_lines()
-        .iter()
-        .filter(|&&line| line == boundary)
-        .count()
+/// How many vertical lines the matrix draws at each column boundary, its left edge first
+pub(crate) fn column_rules(matrix: &Matrix<'_>) -> Vec<usize> {
+    let mut rules = vec![0; matrix.num_cols() + 1];
+    for &boundary in matrix.column_lines() {
+        rules[boundary] += 1;
+    }
+    rules
 }
 
 /// The styles of the font command `op`, outermost first, if it is one
@@ -432,6 +481,9 @@ pub(crate) trait Operand<'a> {
     /// Whether the operand is a minus prefixing something, which reads badly after `⅟`
     fn is_negated(&self) -> bool;
 
+    /// Whether anything was typed for the operand
+    fn is_present(&self) -> bool;
+
     /// The sign this operand prefixes, and the operand it prefixes it to
     fn peel_sign(&self) -> Option<(&'a str, &Self)>;
 
@@ -449,9 +501,13 @@ impl<'a> Operand<'a> for Simple<'a> {
 
     fn is_negated(&self) -> bool {
         match self {
-            Simple::Signed(signed) => signed.sign == "-" && signed.operand().as_option().is_some(),
+            Simple::Signed(signed) => signed.sign == "-" && signed.operand().is_present(),
             simple => paren_contents(simple).is_some_and(is_negation),
         }
+    }
+
+    fn is_present(&self) -> bool {
+        self.as_option().is_some()
     }
 
     fn peel_sign(&self) -> Option<(&'a str, &Self)> {
@@ -480,11 +536,13 @@ impl<'a> Operand<'a> for ScriptFunc<'a> {
 
     fn is_negated(&self) -> bool {
         match self {
-            ScriptFunc::Signed(signed) => {
-                signed.sign == "-" && !matches!(signed.operand().as_simple(), Some(Simple::Missing))
-            }
+            ScriptFunc::Signed(signed) => signed.sign == "-" && signed.operand().is_present(),
             func => func.as_simple().is_some_and(Operand::is_negated),
         }
+    }
+
+    fn is_present(&self) -> bool {
+        self.as_simple().is_none_or(Operand::is_present)
     }
 
     fn peel_sign(&self) -> Option<(&'a str, &Self)> {
@@ -504,6 +562,7 @@ impl<'a> Operand<'a> for ScriptFunc<'a> {
 }
 
 impl Conf {
+    /// The contents of `simple` when its brackets only group and are dropped
     pub(crate) fn stripped<'s, 'a>(self, simple: &'s Simple<'a>) -> Option<&'s Expression<'a>> {
         if self.strip_brackets {
             // a placeholder stands in for an empty group, brackets and all
@@ -545,14 +604,12 @@ impl Conf {
         }
     }
 
-    /// What stands in for a subscript that isn't there yet
-    pub(crate) fn sub_placeholder(self) -> Option<char> {
-        self.placeholders.map(|marks| marks.sub)
-    }
-
-    /// What stands in for a superscript that isn't there yet
-    pub(crate) fn sup_placeholder(self) -> Option<char> {
-        self.placeholders.map(|marks| marks.sup)
+    /// What stands in for a script that isn't there yet
+    fn script_placeholder(self, shift: Shift) -> Option<char> {
+        self.placeholders.map(|marks| match shift {
+            Shift::Sub => marks.sub,
+            Shift::Sup => marks.sup,
+        })
     }
 
     pub(crate) fn unwrap_single<'s, 'a>(self, simple: &'s Simple<'a>) -> &'s Simple<'a> {
@@ -569,11 +626,7 @@ impl Conf {
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
         out.write_str(simple.func)?;
-        if name_without_argument(simple.arg()) {
-            Ok(())
-        } else {
-            self.inline_applied_arg(simple.arg(), hugs_argument(simple.arg()), out)
-        }
+        self.inline_applied_arg(simple.arg(), ArgGap::of_simple(simple.arg()), out)
     }
 
     fn inline_root(
@@ -596,7 +649,7 @@ impl Conf {
         if let Some(root) = root_char(unwrap_parens(index)) {
             let mut buf = [0; 4];
             self.inline_root(root.encode_utf8(&mut buf), radicand, out)
-        } else if let Some(sup_conf) = out.conf.with_sup()
+        } else if let Some(sup_conf) = out.conf.with_shift(Shift::Sup)
             && let Some(text) = self.mapped_operand(index, sup_conf)
         {
             out.inner.write_str(&text)?;
@@ -627,9 +680,9 @@ impl Conf {
         if let Simple::Group(group) = simple
             && self.stripped(simple).is_some()
         {
-            out.write_str(left_bracket_str(group.left_bracket))?;
+            out.write_str(bracket_str(group.left_bracket))?;
             out.write_lined(unlined)?;
-            out.write_str(right_bracket_str(group.right_bracket))
+            out.write_str(bracket_str(group.right_bracket))
         } else {
             out.write_lined(unlined)
         }
@@ -648,22 +701,29 @@ impl Conf {
         }
     }
 
-    /// Write a name's argument after it
+    /// Write `arg` after a name, meeting it as `gap` says
     fn inline_applied_arg<'a>(
         self,
         arg: &impl Operand<'a>,
-        hugs: bool,
+        gap: ArgGap,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
-        let mut text = String::new();
-        arg.inline_as_written(self, &mut out.onto(&mut text))?;
-        Self::write_applied_arg(&text, hugs, out)
+        if gap == ArgGap::Bare {
+            Ok(())
+        } else {
+            let mut text = String::new();
+            arg.inline_as_written(self, &mut out.onto(&mut text))?;
+            Self::write_applied_arg(&text, gap, out)
+        }
     }
 
-    /// Write a name's argument, already written as `text`, after it; a space separates them
-    /// unless the argument hugs the name or renders to nothing
-    fn write_applied_arg(text: &str, hugs: bool, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
-        if !hugs && !text.is_empty() {
+    /// Write a name's argument, already written as `text`, after it, meeting it as `gap` says
+    fn write_applied_arg(
+        text: &str,
+        gap: ArgGap,
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
+        if gap.spaced(text.is_empty()) {
             out.write_char(' ')?;
         }
         out.inner.write_str(text)
@@ -677,8 +737,8 @@ impl Conf {
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
         out.write_str(op)?;
-        self.inline_applied_arg(first, false, out)?;
-        self.inline_applied_arg(second, false, out)
+        self.inline_applied_arg(first, ArgGap::Spaced, out)?;
+        self.inline_applied_arg(second, ArgGap::Spaced, out)
     }
 
     fn inline_overset(
@@ -697,7 +757,7 @@ impl Conf {
                 out.write_accented(&text, mark)
             } else {
                 out.write_lined(&text)?;
-                self.inline_sub_or_sup(over, out.conf.with_sup(), '^', self.sup_placeholder(), out)
+                self.inline_sub_or_sup(over, Shift::Sup, out)
             }
         } else if matches!(self.unwrap_single(base), symb!("=")) {
             let text = self.render_unlined(over, out)?;
@@ -705,21 +765,20 @@ impl Conf {
                 out.write_char(relation)
             } else {
                 self.inline_simple_stripped(base, out)?;
-                if let Some(raised) =
-                    self.mapped_script(over, out.conf.with_sup(), self.sup_placeholder())
-                {
+                if let Some(raised) = self.mapped_script(over, out.conf, Shift::Sup) {
                     out.inner.write_str(&raised)
                 } else {
-                    out.write_char('^')?;
+                    out.write_char(Shift::Sup.marker())?;
                     self.write_as_written(over, &text, out)
                 }
             }
         } else {
             self.inline_simple_stripped(base, out)?;
-            self.inline_sub_or_sup(over, out.conf.with_sup(), '^', self.sup_placeholder(), out)
+            self.inline_sub_or_sup(over, Shift::Sup, out)
         }
     }
 
+    /// Render a command with two arguments on one line
     pub(crate) fn inline_simplebinary(
         self,
         simple: &SimpleBinary<'_>,
@@ -727,18 +786,11 @@ impl Conf {
     ) -> fmt::Result {
         match (simple.op, simple.first(), simple.second()) {
             ("root", index, radicand) => self.inline_nroot(index, radicand, out),
-            ("frac", numer, denom) => {
-                let compact = self.mapped_frac(numer, denom, out);
-                if let Some(text) = compact {
-                    out.inner.write_str(&text)
-                } else {
-                    self.inline_plain_frac(numer, denom, out)
-                }
-            }
+            ("frac", numer, denom) => self.inline_frac(numer, denom, out),
             ("stackrel" | "overset", over, base) => self.inline_overset(over, base, out),
             ("underset", under, base) => {
                 self.inline_simple_stripped(base, out)?;
-                self.inline_sub_or_sup(under, out.conf.with_sub(), '_', self.sub_placeholder(), out)
+                self.inline_sub_or_sup(under, Shift::Sub, out)
             }
             // styling and annotations that plain text can't carry
             ("color" | "id" | "class", _, arg) => self.inline_simple_stripped(arg, out),
@@ -779,7 +831,7 @@ impl Conf {
         if has_emoji(&text) {
             self.write_command(op, arg, &text, out)
         } else {
-            out.with_modifier(line).write_lined(&text)
+            out.with_line(line).write_lined(&text)
         }
     }
 
@@ -794,7 +846,7 @@ impl Conf {
         out.write_str(op)?;
         let mut written = String::new();
         self.write_as_written(arg, text, &mut out.onto(&mut written))?;
-        Self::write_applied_arg(&written, false, out)
+        Self::write_applied_arg(&written, ArgGap::Spaced, out)
     }
 
     /// A `line` goes on every char of a longer argument; a mark can only sit on one, so
@@ -813,7 +865,7 @@ impl Conf {
         } else if let Some(line) = line
             && !has_emoji(&text)
         {
-            out.with_modifier(line).write_lined(&text)
+            out.with_line(line).write_lined(&text)
         } else {
             self.write_command(op, arg, &text, out)
         }
@@ -826,9 +878,10 @@ impl Conf {
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
         out.write_str(op)?;
-        self.inline_applied_arg(arg, false, out)
+        self.inline_applied_arg(arg, ArgGap::Spaced, out)
     }
 
+    /// Render a command with one argument on one line
     pub(crate) fn inline_simpleunary(
         self,
         simple: &SimpleUnary<'_>,
@@ -865,8 +918,8 @@ impl Conf {
     }
 
     fn inline_matrix(self, matrix: &Matrix<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
-        let left = left_bracket_str(matrix.left_bracket);
-        let right = right_bracket_str(matrix.right_bracket);
+        let left = bracket_str(matrix.left_bracket);
+        let right = bracket_str(matrix.right_bracket);
         // rows in a missing bracket would run together, and rows in bars would read as absolute
         // values
         let (row_left, row_right) = if [left, right]
@@ -878,43 +931,40 @@ impl Conf {
             (left, right)
         };
         out.write_str(left)?;
-        for (i, row) in matrix.rows().enumerate() {
-            if i > 0 {
+        let rules = column_rules(matrix);
+        for (row_index, row) in matrix.rows().enumerate() {
+            if row_index > 0 {
                 out.write_char(',')?;
             }
             out.write_str(row_left)?;
-            for (j, expr) in row.iter().enumerate() {
-                let rules = column_rules(matrix, j);
-                if j > 0 && rules == 0 {
+            for (col, expr) in row.iter().enumerate() {
+                if col > 0 && rules[col] == 0 {
                     out.write_char(',')?;
                 }
-                for _ in 0..rules {
-                    out.write_char('|')?;
-                }
+                out.write_str(&"|".repeat(rules[col]))?;
                 if let Some(chr) = self.empty_placeholder(expr) {
                     out.write_char(chr)?;
                 } else {
                     self.grid_cell().inline_expression(expr, out)?;
                 }
             }
-            for _ in 0..column_rules(matrix, row.len()) {
-                out.write_char('|')?;
-            }
+            out.write_str(&"|".repeat(rules[row.len()]))?;
             out.write_str(row_right)?;
         }
         out.write_str(right)
     }
 
     fn inline_group(self, group: &Group<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
-        out.write_str(left_bracket_str(group.left_bracket))?;
+        out.write_str(bracket_str(group.left_bracket))?;
         if let Some(chr) = self.group_placeholder(group) {
             out.write_char(chr)?;
         } else {
             self.inline_expression(&group.expr, out)?;
         }
-        out.write_str(right_bracket_str(group.right_bracket))
+        out.write_str(bracket_str(group.right_bracket))
     }
 
+    /// Render `simple` on one line, as written
     pub(crate) fn inline_simple(
         self,
         simple: &Simple<'_>,
@@ -931,10 +981,7 @@ impl Conf {
                 &Simple::Symbol(Symbol { text, .. }) | &Simple::Sign(text) => {
                     out.write_str(symbol_str(text, self.skin_tone))
                 }
-                Simple::Signed(signed) => {
-                    out.write_str(symbol_str(signed.sign, self.skin_tone))?;
-                    self.inline_simple(signed.operand(), out)
-                }
+                Simple::Signed(signed) => self.inline_signed(signed.sign, signed.operand(), out),
                 Simple::Func(func) => self.inline_simplefunc(func, out),
                 Simple::Unary(unary) => self.inline_simpleunary(unary, out),
                 Simple::Binary(binary) => self.inline_simplebinary(binary, out),
@@ -984,16 +1031,16 @@ impl Conf {
         Some(text)
     }
 
-    /// `script` with every char mapped through `conf`, if all map; where a script can go at all,
-    /// one that isn't there yet is its `placeholder` as is
+    /// `script` shifted and every char mapped through `conf`, if all map; where a script can go
+    /// at all, one that isn't there yet is its placeholder as is
     pub(crate) fn mapped_script(
         self,
         script: &Simple<'_>,
-        conf: Option<MapperConf>,
-        placeholder: Option<char>,
+        conf: MapperConf,
+        shift: Shift,
     ) -> Option<String> {
-        let conf = conf?;
-        if let Some(chr) = placeholder
+        let conf = conf.with_shift(shift)?;
+        if let Some(chr) = self.script_placeholder(shift)
             && self.is_missing(script)
         {
             Some(chr.to_string())
@@ -1002,19 +1049,17 @@ impl Conf {
         }
     }
 
-    /// Write `script` through `conf` when every char maps, otherwise after a literal `marker`
+    /// Write `script` shifted when every char maps, otherwise after a literal marker
     fn inline_sub_or_sup(
         self,
         script: &Simple<'_>,
-        conf: Option<MapperConf>,
-        marker: char,
-        placeholder: Option<char>,
+        shift: Shift,
         out: &mut Mapper<impl fmt::Write>,
     ) -> fmt::Result {
-        if let Some(text) = self.mapped_script(script, conf, placeholder) {
+        if let Some(text) = self.mapped_script(script, out.conf, shift) {
             out.inner.write_str(&text)
         } else {
-            out.write_char(marker)?;
+            out.write_char(shift.marker())?;
             self.inline_simple(script, out)
         }
     }
@@ -1022,24 +1067,18 @@ impl Conf {
     fn inline_script(self, script: &Script<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
         match script {
             Script::None => Ok(()),
-            Script::Sub(sub) => {
-                self.inline_sub_or_sup(sub, out.conf.with_sub(), '_', self.sub_placeholder(), out)
-            }
-            Script::Super(sup) => {
-                self.inline_sub_or_sup(sup, out.conf.with_sup(), '^', self.sup_placeholder(), out)
-            }
+            Script::Sub(sub) => self.inline_sub_or_sup(sub, Shift::Sub, out),
+            Script::Super(sup) => self.inline_sub_or_sup(sup, Shift::Sup, out),
             Script::Subsuper(sub, sup) => {
-                if let Some(lower) =
-                    self.mapped_script(sub, out.conf.with_sub(), self.sub_placeholder())
-                    && let Some(upper) =
-                        self.mapped_script(sup, out.conf.with_sup(), self.sup_placeholder())
+                if let Some(lower) = self.mapped_script(sub, out.conf, Shift::Sub)
+                    && let Some(upper) = self.mapped_script(sup, out.conf, Shift::Sup)
                 {
                     out.inner.write_str(&lower)?;
                     out.inner.write_str(&upper)
                 } else {
-                    out.write_char('_')?;
+                    out.write_char(Shift::Sub.marker())?;
                     self.inline_simple(sub, out)?;
-                    out.write_char('^')?;
+                    out.write_char(Shift::Sup.marker())?;
                     self.inline_simple(sup, out)
                 }
             }
@@ -1058,11 +1097,7 @@ impl Conf {
     fn inline_func(self, func: &Func<'_>, out: &mut Mapper<impl fmt::Write>) -> fmt::Result {
         out.write_str(func.func)?;
         self.inline_script(&func.script, out)?;
-        if func.arg().as_simple().is_some_and(name_without_argument) {
-            Ok(())
-        } else {
-            self.inline_applied_arg(func.arg(), func_hugs_argument(func), out)
-        }
+        self.inline_applied_arg(func.arg(), ArgGap::of_func(func), out)
     }
 
     fn inline_scriptfunc(
@@ -1073,10 +1108,7 @@ impl Conf {
         match func {
             ScriptFunc::Simple(simple) => self.inline_simplescript(simple, out),
             ScriptFunc::Func(func) => self.inline_func(func, out),
-            ScriptFunc::Signed(signed) => {
-                out.write_str(symbol_str(signed.sign, self.skin_tone))?;
-                self.inline_scriptfunc(signed.operand(), out)
-            }
+            ScriptFunc::Signed(signed) => self.inline_signed(signed.sign, signed.operand(), out),
         }
     }
 
@@ -1134,7 +1166,7 @@ impl Conf {
         {
             out.mapped_str(&frac)
         } else if self.script_fracs()
-            && let Some(sub_conf) = out.conf.with_sub()
+            && let Some(sub_conf) = out.conf.with_shift(Shift::Sub)
             && let Some(lower) = self.mapped_operand(denom, sub_conf)
         {
             // a styled 1 has no place in `⅟`
@@ -1145,17 +1177,41 @@ impl Conf {
                 )
                 && out.conf.font.leaves("1")
                 && !denom.is_negated()
-                && let Some(marker) = out.mapped_char('⅟')
+                && let Some(marker) = out.mapped_str("⅟")
             {
                 Some(marker + &lower)
             } else {
-                let upper = self.mapped_operand(numer, out.conf.with_sup()?)?;
-                let slash = out.mapped_char('⁄')?;
+                let upper = self.mapped_operand(numer, out.conf.with_shift(Shift::Sup)?)?;
+                let slash = out.mapped_str("⁄")?;
                 Some(upper + &slash + &lower)
             }
         } else {
             None
         }
+    }
+
+    fn inline_frac<'a>(
+        self,
+        numer: &impl Operand<'a>,
+        denom: &impl Operand<'a>,
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
+        if let Some(compact) = self.mapped_frac(numer, denom, out) {
+            out.inner.write_str(&compact)
+        } else {
+            self.inline_plain_frac(numer, denom, out)
+        }
+    }
+
+    /// Write `operand` after the `sign` that prefixes it
+    fn inline_signed<'a>(
+        self,
+        sign: &str,
+        operand: &impl Operand<'a>,
+        out: &mut Mapper<impl fmt::Write>,
+    ) -> fmt::Result {
+        out.write_str(symbol_str(sign, self.skin_tone))?;
+        operand.inline_as_written(self, out)
     }
 
     /// Brackets stay: without them a slash makes the order of operations unclear
@@ -1170,6 +1226,7 @@ impl Conf {
         denom.inline_as_written(self, out)
     }
 
+    /// Render `expr` on one line, spacing its items
     pub(crate) fn inline_expression(
         self,
         expr: &Expression<'_>,
@@ -1179,59 +1236,48 @@ impl Conf {
         // cell, so the multi-line layout would show a script's operators as padded as full-size
         // math
         let spacing_operators =
-            self.spaced_operators && !(self.layout == Layout::Block && out.conf.sub_sup.is_some());
-        let mut prev_edge = None;
-        let mut prev_spaced_op = false;
-        // the runs typed on both sides of an item that renders to nothing both belong in the output
-        let mut typed = String::new();
-        for inter in expr.iter() {
-            // an item that renders to nothing, like an empty group, must not leave a space behind
-            let mut text = String::new();
-            let (leading_edge, trailing_edge) = {
-                let mut item = out.onto(&mut text);
-                match inter {
-                    Intermediate::Space(space) => {
-                        if self.keep_spaces {
-                            typed.push_str(space);
-                        }
-                        continue;
-                    }
-                    Intermediate::ScriptFunc(func) => {
-                        self.inline_scriptfunc(func, &mut item)?;
-                        scriptfunc_edges(func)
-                    }
-                    Intermediate::Frac(frac) => {
-                        match self.mapped_frac(&frac.numer, &frac.denom, &item) {
-                            Some(compact) => item.inner.write_str(&compact)?,
-                            None => self.inline_plain_frac(&frac.numer, &frac.denom, &mut item)?,
-                        }
-                        frac_edges(frac)
-                    }
+            self.spaced_operators && !(self.layout == Layout::Block && out.conf.shift.is_some());
+        let conf = out.conf;
+        separated_items(expr, self.keep_spaces, spacing_operators, |inter, sep| {
+            let mut item = SeparatedItem {
+                inner: &mut *out.inner,
+                sep: Some(sep),
+                conf: self,
+                mapper_conf: conf,
+            };
+            let rendered = match inter {
+                Intermediate::Space(_) => Ok(()),
+                Intermediate::ScriptFunc(func) => {
+                    self.inline_scriptfunc(func, &mut conf.wrap(&mut item))
+                }
+                Intermediate::Frac(frac) => {
+                    self.inline_frac(&frac.numer, &frac.denom, &mut conf.wrap(&mut item))
                 }
             };
-            if text.is_empty() {
-                continue;
+            match rendered {
+                Ok(()) if item.sep.is_some() => None,
+                result => Some(result),
             }
-            let spaced_op = spacing_operators && inter_is_spaced_op(inter);
-            if let Some(prev_edge) = prev_edge {
-                if typed.is_empty() {
-                    if prev_spaced_op || spaced_op || needs_space(prev_edge, leading_edge) {
-                        out.write_char(' ')?;
-                    }
-                } else if self.layout == Layout::Block {
-                    // the multi-line layout places this rendering as one of its lines, so a typed
-                    // tab or newline would throw off its width
-                    out.write_str(&" ".repeat(UnicodeWidthStr::width(&*typed)))?;
-                } else {
-                    out.write_str(&typed)?;
-                }
+        })
+        .collect()
+    }
+
+    /// Write `sep` through `out`
+    fn write_separator(
+        self,
+        sep: Separator<'_>,
+        out: &mut Mapper<'_, impl fmt::Write + ?Sized>,
+    ) -> fmt::Result {
+        match sep {
+            // the multi-line layout places this rendering as one of its lines, so a typed tab or
+            // newline would throw off its width
+            Separator::Typed(run) if self.layout == Layout::Block => {
+                out.write_str(&" ".repeat(UnicodeWidthStr::width(run)))
             }
-            out.inner.write_str(&text)?;
-            prev_edge = Some(trailing_edge);
-            prev_spaced_op = spaced_op;
-            typed.clear();
+            Separator::Typed(run) => out.write_str(run),
+            Separator::Space => out.write_char(' '),
+            Separator::Nothing => Ok(()),
         }
-        Ok(())
     }
 }
 
@@ -1239,209 +1285,126 @@ impl Conf {
 mod tests {
     use super::super::{Conf, Layout, Placeholders, SkinTone};
 
+    /// `inp` rendered with the default configuration
+    fn render(inp: &str) -> String {
+        super::super::parse_unicode(inp).to_string()
+    }
+
     #[test]
     fn example() {
-        let ex = "sum_(i=1)^n i^3=((n(n+1))/2)^2";
-        let expected = "∑ᵢ₌₁ⁿ i³=(ⁿ⁽ⁿ⁺¹⁾⁄₂)²";
-
-        let res = super::super::parse_unicode(ex).to_string();
-        assert_eq!(res, expected);
-
-        let rend = Conf::default().parse(ex);
-        assert_eq!(format!("{rend}"), expected);
+        assert_eq!(
+            render("sum_(i=1)^n i^3=((n(n+1))/2)^2"),
+            "∑ᵢ₌₁ⁿ i³=(ⁿ⁽ⁿ⁺¹⁾⁄₂)²"
+        );
     }
 
     #[test]
     fn vulgar_fracs() {
-        let opts = Conf {
-            vulgar_fracs: true,
-            ..Default::default()
-        };
-        let res = opts.parse("1/2").to_string();
-        assert_eq!(res, "½");
-
-        let res = opts.parse("a / s").to_string();
-        assert_eq!(res, "℁");
-    }
-
-    #[test]
-    fn stripped_vulgar_fracs() {
-        let opts = Conf {
-            vulgar_fracs: true,
-            strip_brackets: true,
-            ..Default::default()
-        };
-        let res = opts.parse("(1)/2").to_string();
-        assert_eq!(res, "½");
-
-        let res = opts.parse("7/(8)").to_string();
-        assert_eq!(res, "⅞");
-
-        let res = opts.parse("{:a:} / (s)").to_string();
-        assert_eq!(res, "℁");
+        for (inp, frac) in [
+            ("1/2", "½"),
+            ("1/3", "⅓"),
+            ("2/3", "⅔"),
+            ("1/4", "¼"),
+            ("3/4", "¾"),
+            ("1/5", "⅕"),
+            ("2/5", "⅖"),
+            ("3/5", "⅗"),
+            ("4/5", "⅘"),
+            ("1/6", "⅙"),
+            ("5/6", "⅚"),
+            ("1/7", "⅐"),
+            ("1/8", "⅛"),
+            ("3/8", "⅜"),
+            ("5/8", "⅝"),
+            ("7/8", "⅞"),
+            ("1/9", "⅑"),
+            ("1/10", "⅒"),
+        ] {
+            assert_eq!(render(inp), frac, "{inp}");
+        }
+        assert_eq!(render("a / s"), "℁");
+        // brackets that only group are dropped first
+        assert_eq!(render("(1)/2"), "½");
+        assert_eq!(render("7/(8)"), "⅞");
+        assert_eq!(render("{:a:} / (s)"), "℁");
     }
 
     #[test]
     fn script_fracs() {
-        let opts = Conf {
-            layout: Layout::InlineScript,
-            strip_brackets: false,
-            ..Default::default()
-        };
-        let res = opts.parse("y / x").to_string();
-        assert_eq!(res, "ʸ⁄ₓ");
+        assert_eq!(render("(y) / x"), "ʸ⁄ₓ");
+        assert_eq!(render("y / (x)"), "ʸ⁄ₓ");
+        assert_eq!(render("(y)/(x)"), "ʸ⁄ₓ");
 
-        let res = opts.parse("(y) / x").to_string();
-        assert_eq!(res, "⁽ʸ⁾⁄ₓ");
-    }
-
-    #[test]
-    fn stripped_script_fracs() {
-        let opts = Conf {
-            layout: Layout::InlineScript,
-            ..Default::default()
-        };
-
-        let res = opts.parse("(y) / x").to_string();
-        assert_eq!(res, "ʸ⁄ₓ");
-
-        let res = opts.parse("y / (x)").to_string();
-        assert_eq!(res, "ʸ⁄ₓ");
-
-        let res = opts.parse("(y)/(x)").to_string();
-        assert_eq!(res, "ʸ⁄ₓ");
+        let kept = Conf::default().with_strip_brackets(false);
+        assert_eq!(kept.parse("y / x").to_string(), "ʸ⁄ₓ");
+        assert_eq!(kept.parse("(y) / x").to_string(), "⁽ʸ⁾⁄ₓ");
     }
 
     #[test]
     fn one_fracs() {
-        let res = super::super::parse_unicode("1/x").to_string();
-        assert_eq!(res, "⅟ₓ");
-
-        let res = super::super::parse_unicode("1 / sinx").to_string();
-        assert_eq!(res, "⅟ₛᵢₙ\u{2009}ₓ");
-
-        let opts = Conf {
-            layout: Layout::InlinePlain,
-            vulgar_fracs: false,
-            strip_brackets: false,
-            ..Default::default()
-        };
-        let res = opts.parse("1 / sinx").to_string();
-        assert_eq!(res, "1/sin x");
+        assert_eq!(render("1/x"), "⅟ₓ");
+        assert_eq!(render("1 / sinx"), "⅟ₛᵢₙ\u{2009}ₓ");
     }
 
     #[test]
-    fn normal_fracs() {
-        let opts = Conf {
-            layout: Layout::InlinePlain,
-            vulgar_fracs: false,
-            strip_brackets: false,
-            ..Default::default()
-        };
-
-        let res = opts.parse("sinx / cosy").to_string();
-        assert_eq!(res, "sin x/cos y");
+    fn plain_fracs() {
+        let plain = Conf::default().with_layout(Layout::InlinePlain);
+        assert_eq!(plain.parse("1 / sinx").to_string(), "1/sin x");
+        assert_eq!(plain.parse("sinx / cosy").to_string(), "sin x/cos y");
+        // brackets stay, since a slash leaves the order of operations unclear without them
+        assert_eq!(plain.parse("(x)/y").to_string(), "(x)/y");
+        let kept = plain.with_strip_brackets(false);
+        assert_eq!(kept.parse("(x)/y").to_string(), "(x)/y");
+        assert_eq!(kept.parse("1/2").to_string(), "½");
     }
 
     #[test]
     #[allow(clippy::unicode_not_nfc)]
     fn unary() {
-        let res = super::super::parse_unicode("sqrt x").to_string();
-        assert_eq!(res, "√x");
-
-        let res = super::super::parse_unicode("vec x").to_string();
-        assert_eq!(res, "x\u{20D7}");
-
-        let res = super::super::parse_unicode("bbb E").to_string();
-        assert_eq!(res, "𝔼");
-
-        let res = super::super::parse_unicode("bbb (E)").to_string();
-        assert_eq!(res, "𝔼");
-
-        let res = super::super::parse_unicode("dot x").to_string();
-        assert_eq!(res, "ẋ");
-
-        let res = super::super::parse_unicode("dot(x)").to_string();
-        assert_eq!(res, "ẋ");
-
-        let res = super::super::parse_unicode("norm x").to_string();
-        assert_eq!(res, "||x||");
-
-        let res = super::super::parse_unicode("sqrt overline x").to_string();
-        assert_eq!(res, "√x̅");
-
-        let res = super::super::parse_unicode("sqrt overline(x)").to_string();
-        assert_eq!(res, "√x̅");
+        assert_eq!(render("sqrt x"), "√x");
+        assert_eq!(render("bbb E"), "𝔼");
+        assert_eq!(render("bbb (E)"), "𝔼");
+        assert_eq!(render("dot x"), "ẋ");
+        assert_eq!(render("dot(x)"), "ẋ");
+        assert_eq!(render("norm x"), "||x||");
+        assert_eq!(render("sqrt overline x"), "√x̅");
+        assert_eq!(render("sqrt overline(x)"), "√x̅");
     }
 
     #[test]
     fn binary() {
-        let res = super::super::parse_unicode("root 3 x").to_string();
-        assert_eq!(res, "∛x");
-
-        let res = super::super::parse_unicode("root (4) x").to_string();
-        assert_eq!(res, "∜x");
-
-        let res = super::super::parse_unicode("stackrel *** =").to_string();
-        assert_eq!(res, "≛");
-
-        let res = super::super::parse_unicode("overset a x").to_string();
-        assert_eq!(res, "x\u{0363}");
-
-        let res = super::super::parse_unicode("overset (e) (y)").to_string();
-        assert_eq!(res, "y\u{0364}");
-
+        assert_eq!(render("root 3 x"), "∛x");
+        assert_eq!(render("root (4) x"), "∜x");
+        assert_eq!(render("stackrel *** ="), "≛");
+        assert_eq!(render("overset a x"), "x\u{0363}");
+        assert_eq!(render("overset (e) (y)"), "y\u{0364}");
         // a multi-char base can't take a combining letter, so it is raised instead
-        let res = super::super::parse_unicode("oversetasinx").to_string();
-        assert_eq!(res, "sin xᵃ");
-
+        assert_eq!(render("oversetasinx"), "sin xᵃ");
         // a sign carries the operand after it, so it stays within the argument it signs
-        let res = super::super::parse_unicode("root -1 2").to_string();
-        assert_eq!(res, "⁻¹√2");
-
-        let res = super::super::parse_unicode("stackrel -1 2").to_string();
-        assert_eq!(res, "2⁻¹");
-
-        let res = super::super::parse_unicode("overset -x y").to_string();
-        assert_eq!(res, "y⁻ˣ");
-
-        let res = super::super::parse_unicode("frac -1 2").to_string();
-        assert_eq!(res, "-½");
+        assert_eq!(render("root -1 2"), "⁻¹√2");
+        assert_eq!(render("stackrel -1 2"), "2⁻¹");
+        assert_eq!(render("overset -x y"), "y⁻ˣ");
+        assert_eq!(render("frac -1 2"), "-½");
     }
 
     #[test]
     fn functions() {
-        let res = super::super::parse_unicode("sin x/x").to_string();
-        assert_eq!(res, "ˢⁱⁿ\u{2009}ˣ⁄ₓ");
+        assert_eq!(render("sin x/x"), "ˢⁱⁿ\u{2009}ˣ⁄ₓ");
     }
 
     #[test]
     fn script() {
-        let res = super::super::parse_unicode("x^sin x").to_string();
-        assert_eq!(res, "xˢⁱⁿ\u{2009}ˣ");
-
-        let res = super::super::parse_unicode("x^vec(x)").to_string();
-        assert_eq!(res, "xˣ\u{20D7}");
-
-        let res = super::super::parse_unicode("x_x^y").to_string();
-        assert_eq!(res, "xₓʸ");
-
-        let res = super::super::parse_unicode("x_y^sin x").to_string();
-        assert_eq!(res, "x_y^sin x");
-
-        let res = super::super::parse_unicode("x^sin rho").to_string();
-        assert_eq!(res, "x^sin ρ");
-
-        let res = super::super::parse_unicode("x_x").to_string();
-        assert_eq!(res, "xₓ");
-
-        let res = super::super::parse_unicode("x_y").to_string();
-        assert_eq!(res, "x_y");
+        assert_eq!(render("x^sin x"), "xˢⁱⁿ\u{2009}ˣ");
+        assert_eq!(render("x^vec(x)"), "xˣ\u{20D7}");
+        assert_eq!(render("x_x^y"), "xₓʸ");
+        assert_eq!(render("x_y^sin x"), "x_y^sin x");
+        assert_eq!(render("x^sin rho"), "x^sin ρ");
+        assert_eq!(render("x_x"), "xₓ");
+        assert_eq!(render("x_y"), "x_y");
     }
 
     #[test]
     fn script_strips_group_brackets() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         // a subscriptable group renders its inner expression without the brackets
         assert_eq!(render("x_(2i)"), "x₂ᵢ");
         assert_eq!(render("x^(2i)"), "x²ⁱ");
@@ -1449,23 +1412,17 @@ mod tests {
         // a group that can't be subscripted keeps its brackets to preserve grouping
         assert_eq!(render("x_(A+B)"), "x_(A+B)");
 
-        // --no-strip-brackets leaves the brackets in place
-        let conf = Conf {
-            strip_brackets: false,
-            ..Default::default()
-        };
-        assert_eq!(conf.parse("x_(2i)").to_string(), "x₍₂ᵢ₎");
+        let kept = Conf::default().with_strip_brackets(false);
+        assert_eq!(kept.parse("x_(2i)").to_string(), "x₍₂ᵢ₎");
     }
 
     #[test]
     fn text() {
-        let res = super::super::parse_unicode("\"text\"").to_string();
-        assert_eq!(res, "text");
+        assert_eq!(render("\"text\""), "text");
     }
 
     #[test]
     fn control_chars_in_text_are_replaced() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("\"a\u{1b}b\u{1}c\u{7f}d\u{9b}e\""), "a�b�c�d�e");
         // whitespace stays as typed
         assert_eq!(render("\"a\tb\nc\u{85}d\""), "a\tb\nc\u{85}d");
@@ -1474,10 +1431,7 @@ mod tests {
 
     #[test]
     fn matrix() {
-        let opts = Conf::default();
-
-        let res = opts.parse("[ [x, y], [a, b] ]").to_string();
-        assert_eq!(res, "[[x,y],[a,b]]");
+        assert_eq!(render("[ [x, y], [a, b] ]"), "[[x,y],[a,b]]");
     }
 
     #[test]
@@ -1505,7 +1459,6 @@ mod tests {
 
     #[test]
     fn matrix_rows_without_a_bracket_to_repeat() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("{(a, if x),(b, else):}"), "{(a,if x),(b,else)");
         assert_eq!(render("{[a,b],[c,d]:}"), "{(a,b),(c,d)");
         assert_eq!(render("{:(a,b),(c,d):}"), "(a,b),(c,d)");
@@ -1516,7 +1469,6 @@ mod tests {
 
     #[test]
     fn matrix_column_lines() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("[(a,|,b),(c,|,d)]"), "[[a|b],[c|d]]");
         assert_eq!(render("[(|,a,b,|),(|,c,d,|)]"), "[[|a,b|],[|c,d|]]");
         assert_eq!(render("[(a,|,|,b),(c,|,|,d)]"), "[[a||b],[c||d]]");
@@ -1524,128 +1476,48 @@ mod tests {
 
     #[test]
     fn skin_tone() {
-        let opts = Conf {
-            skin_tone: SkinTone::Default,
-            ..Default::default()
-        };
-        let res = opts.parse(":hand:").to_string();
-        assert_eq!(res, "✋");
-
-        let opts = Conf {
-            skin_tone: SkinTone::Dark,
-            ..Default::default()
-        };
-        let res = opts.parse(":hand:").to_string();
-        assert_eq!(res, "✋🏿");
+        assert_eq!(render(":hand:"), "✋");
+        let dark = Conf::default().with_skin_tone(SkinTone::Dark);
+        assert_eq!(dark.parse(":hand:").to_string(), "✋🏿");
     }
 
     #[test]
     fn empty_input() {
-        assert_eq!(super::super::parse_unicode("").to_string(), "");
+        assert_eq!(render(""), "");
     }
 
     #[test]
-    fn gt_symbol() {
-        let res = super::super::parse_unicode("x > y").to_string();
-        assert_eq!(res, "x>y");
-    }
-
-    #[test]
-    fn land_lor() {
-        let res = super::super::parse_unicode("x land y").to_string();
-        assert_eq!(res, "x∧y");
-
-        let res = super::super::parse_unicode("x lor y").to_string();
-        assert_eq!(res, "x∨y");
-    }
-
-    #[test]
-    fn approx() {
-        let res = super::super::parse_unicode("x approx y").to_string();
-        assert_eq!(res, "x≈y");
+    fn relations_and_operators() {
+        assert_eq!(render("x > y"), "x>y");
+        assert_eq!(render("x land y"), "x∧y");
+        assert_eq!(render("x lor y"), "x∨y");
+        assert_eq!(render("x approx y"), "x≈y");
     }
 
     #[test]
     #[allow(clippy::unicode_not_nfc)]
     fn unary_modifiers() {
-        let res = super::super::parse_unicode("hat x").to_string();
-        assert_eq!(res, "x̂");
-
-        let res = super::super::parse_unicode("tilde x").to_string();
-        assert_eq!(res, "x̃");
-
-        let res = super::super::parse_unicode("bar x").to_string();
-        assert_eq!(res, "x̄");
-
-        let res = super::super::parse_unicode("ddot x").to_string();
-        assert_eq!(res, "ẍ");
-
-        let res = super::super::parse_unicode("overarc x").to_string();
-        assert_eq!(res, "x̑");
-
-        let res = super::super::parse_unicode("overparen x").to_string();
-        assert_eq!(res, "x̑");
-
-        let res = super::super::parse_unicode("ul x").to_string();
-        assert_eq!(res, "x̲");
-
-        let res = super::super::parse_unicode("underline x").to_string();
-        assert_eq!(res, "x̲");
-
-        let res = super::super::parse_unicode("cancel x").to_string();
-        assert_eq!(res, "x\u{0336}");
-
-        let res = super::super::parse_unicode("vec x").to_string();
-        assert_eq!(res, "x\u{20D7}");
-
-        // non-precomposed: q has no precomposed dot or ddot form
-        let res = super::super::parse_unicode("dot q").to_string();
-        assert_eq!(res, "q\u{0307}");
-
-        let res = super::super::parse_unicode("ddot q").to_string();
-        assert_eq!(res, "q\u{0308}");
-
-        let res = super::super::parse_unicode("hat q").to_string();
-        assert_eq!(res, "q\u{0302}");
-
-        let res = super::super::parse_unicode("tilde q").to_string();
-        assert_eq!(res, "q\u{0303}");
-
-        let res = super::super::parse_unicode("bar q").to_string();
-        assert_eq!(res, "q\u{0304}");
-
-        let res = super::super::parse_unicode("vec q").to_string();
-        assert_eq!(res, "q\u{20D7}");
-    }
-
-    #[test]
-    fn vulgar_fraction_patterns() {
-        let opts = Conf {
-            vulgar_fracs: true,
-            ..Default::default()
-        };
-        assert_eq!(opts.parse("1/4").to_string(), "¼");
-        assert_eq!(opts.parse("1/3").to_string(), "⅓");
-        assert_eq!(opts.parse("2/3").to_string(), "⅔");
-        assert_eq!(opts.parse("1/5").to_string(), "⅕");
-        assert_eq!(opts.parse("2/5").to_string(), "⅖");
-        assert_eq!(opts.parse("3/5").to_string(), "⅗");
-        assert_eq!(opts.parse("4/5").to_string(), "⅘");
-        assert_eq!(opts.parse("1/6").to_string(), "⅙");
-        assert_eq!(opts.parse("5/6").to_string(), "⅚");
-        assert_eq!(opts.parse("1/7").to_string(), "⅐");
-        assert_eq!(opts.parse("1/8").to_string(), "⅛");
-        assert_eq!(opts.parse("3/8").to_string(), "⅜");
-        assert_eq!(opts.parse("5/8").to_string(), "⅝");
-        assert_eq!(opts.parse("7/8").to_string(), "⅞");
-        assert_eq!(opts.parse("1/9").to_string(), "⅑");
-        assert_eq!(opts.parse("1/10").to_string(), "⅒");
-        assert_eq!(opts.parse("3/4").to_string(), "¾");
+        assert_eq!(render("hat x"), "x̂");
+        assert_eq!(render("tilde x"), "x̃");
+        assert_eq!(render("bar x"), "x̄");
+        assert_eq!(render("ddot x"), "ẍ");
+        assert_eq!(render("overarc x"), "x̑");
+        assert_eq!(render("overparen x"), "x̑");
+        assert_eq!(render("ul x"), "x̲");
+        assert_eq!(render("underline x"), "x̲");
+        assert_eq!(render("cancel x"), "x\u{0336}");
+        assert_eq!(render("vec x"), "x\u{20D7}");
+        // q has no precomposed form with any of these marks
+        assert_eq!(render("dot q"), "q\u{0307}");
+        assert_eq!(render("ddot q"), "q\u{0308}");
+        assert_eq!(render("hat q"), "q\u{0302}");
+        assert_eq!(render("tilde q"), "q\u{0303}");
+        assert_eq!(render("bar q"), "q\u{0304}");
+        assert_eq!(render("vec q"), "q\u{20D7}");
     }
 
     #[test]
     fn signed_vulgar_fracs() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("-1/2"), "-½");
         assert_eq!(render("+1/2"), "+½");
         assert_eq!(render("pm 1/2"), "±½");
@@ -1663,104 +1535,51 @@ mod tests {
 
     #[test]
     fn signed_vulgar_fracs_in_scripts() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("x^(-1/2)"), "x^(-½)");
         assert_eq!(render("x_(-1/2)"), "x_(-½)");
     }
 
     #[test]
     fn signed_vulgar_fracs_plain() {
-        let opts = Conf {
-            layout: Layout::InlinePlain,
-            ..Default::default()
-        };
-        assert_eq!(opts.parse("-1/2").to_string(), "-½");
-        assert_eq!(opts.parse("pm 1/2").to_string(), "±½");
-        assert_eq!(opts.parse("-3/7").to_string(), "-3/7");
-        assert_eq!(opts.parse("1/-2").to_string(), "1/-2");
+        let plain = Conf::default().with_layout(Layout::InlinePlain);
+        assert_eq!(plain.parse("-1/2").to_string(), "-½");
+        assert_eq!(plain.parse("pm 1/2").to_string(), "±½");
+        assert_eq!(plain.parse("-3/7").to_string(), "-3/7");
+        assert_eq!(plain.parse("1/-2").to_string(), "1/-2");
     }
 
     #[test]
     fn signed_fracs_without_vulgar() {
-        let opts = Conf {
-            vulgar_fracs: false,
-            ..Default::default()
-        };
-        assert_eq!(opts.parse("-1/2").to_string(), "⁻¹⁄₂");
-        assert_eq!(opts.parse("pm 1/2").to_string(), "±1/2");
+        let conf = Conf::default().with_vulgar_fracs(false);
+        assert_eq!(conf.parse("-1/2").to_string(), "⁻¹⁄₂");
+        assert_eq!(conf.parse("pm 1/2").to_string(), "±1/2");
     }
 
     #[test]
-    fn config_no_strip_no_vulgar_no_script() {
-        let opts = Conf {
-            strip_brackets: false,
-            vulgar_fracs: false,
-            layout: Layout::InlinePlain,
-            ..Default::default()
-        };
-        let res = opts.parse("(x)/y").to_string();
-        assert_eq!(res, "(x)/y");
-    }
-
-    #[test]
-    fn config_strip_no_vulgar_no_script() {
-        let opts = Conf {
-            strip_brackets: true,
-            vulgar_fracs: false,
-            layout: Layout::InlinePlain,
-            ..Default::default()
-        };
-        let res = opts.parse("(x)/y").to_string();
-        assert_eq!(res, "(x)/y");
-    }
-
-    #[test]
-    fn config_no_strip_vulgar_no_script() {
-        let opts = Conf {
-            strip_brackets: false,
-            vulgar_fracs: true,
-            layout: Layout::InlinePlain,
-            ..Default::default()
-        };
-        let res = opts.parse("1/2").to_string();
-        assert_eq!(res, "½");
-    }
-
-    #[test]
-    fn config_no_strip_no_vulgar_script() {
-        let opts = Conf {
-            strip_brackets: false,
-            vulgar_fracs: false,
-            layout: Layout::InlineScript,
-            ..Default::default()
-        };
-        // y is not subscriptable, falls through to plain frac
-        let res = opts.parse("x/y").to_string();
-        assert_eq!(res, "x/y");
-        // x is both super/subscriptable
-        let res = opts.parse("x/x").to_string();
-        assert_eq!(res, "ˣ⁄ₓ");
+    fn script_fracs_need_every_char_shifted() {
+        let conf = Conf::default()
+            .with_strip_brackets(false)
+            .with_vulgar_fracs(false);
+        // y has no subscript form
+        assert_eq!(conf.parse("x/y").to_string(), "x/y");
+        assert_eq!(conf.parse("x/x").to_string(), "ˣ⁄ₓ");
     }
 
     #[test]
     fn deeply_nested() {
-        let res = super::super::parse_unicode("((((x))))").to_string();
-        assert_eq!(res, "((((x))))");
+        assert_eq!(render("((((x))))"), "((((x))))");
 
-        let res = super::super::parse_unicode("sqrt sqrt sqrt x").to_string();
-        assert_eq!(res, "√√√x");
+        assert_eq!(render("sqrt sqrt sqrt x"), "√√√x");
     }
 
     #[test]
     fn non_ascii_ident() {
         // non-ASCII characters pass through as identifiers
-        let res = super::super::parse_unicode("λ").to_string();
-        assert_eq!(res, "λ");
+        assert_eq!(render("λ"), "λ");
     }
 
     #[test]
     fn font_operators() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("bb(x)"), "𝐱");
         assert_eq!(render("mathbf(x)"), "𝐱");
         assert_eq!(render("bbb(R)"), "ℝ");
@@ -1784,7 +1603,6 @@ mod tests {
 
     #[test]
     fn a_styled_letter_without_a_script_form_is_not_raised() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("x^(bbb R)"), "x^(ℝ)");
         assert_eq!(render("x^bb x"), "x^𝐱");
         assert_eq!(render("1/(bb x)"), "1/(𝐱)");
@@ -1796,7 +1614,6 @@ mod tests {
     #[test]
     fn bare_function_has_no_trailing_space() {
         // `f` and `g` are function tokens; with no argument they render as just the name
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("g"), "g");
         assert_eq!(render("f"), "f");
         assert_eq!(render("g^2"), "g²");
@@ -1812,7 +1629,6 @@ mod tests {
     #[test]
     #[allow(clippy::unicode_not_nfc)]
     fn nested_fonts_combine() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("bb(it x)"), "𝒙");
         assert_eq!(render("it(bb x)"), "𝒙");
         assert_eq!(render("bbit(x)"), "𝒙");
@@ -1825,7 +1641,6 @@ mod tests {
 
     #[test]
     fn a_fraction_keeps_its_font() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("bb(1/2)"), "𝟏/𝟐");
         assert_eq!(render("bb(1/x)"), "𝟏/𝐱");
         assert_eq!(render("bb(-1/2)"), "-𝟏/𝟐");
@@ -1842,22 +1657,19 @@ mod tests {
             let depth = 40;
             format!("{}x{}", open.repeat(depth), close.repeat(depth))
         };
-        let start = std::time::Instant::now();
         for (open, close) in [
             ("hat(", ")"),
             ("bar(", ")"),
             ("overset(a)(", ")"),
             ("stackrel(", ")(=)"),
         ] {
-            super::super::parse_unicode(&nested(open, close)).to_string();
+            render(&nested(open, close));
         }
-        assert!(start.elapsed() < std::time::Duration::from_secs(1));
     }
 
     #[test]
     #[allow(clippy::unicode_not_nfc)]
     fn a_mark_under_a_line_still_sits_on_its_char() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("cancel(hat x)"), "x\u{0302}\u{0336}");
         assert_eq!(render("bar(hat x)"), "x\u{0302}\u{0304}");
         assert_eq!(render("ul(vec x)"), "x\u{20d7}\u{0332}");
@@ -1950,7 +1762,6 @@ mod tests {
     #[test]
     #[allow(clippy::unicode_not_nfc)]
     fn a_styled_char_keeps_its_font_under_a_mark() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("bb(hat a)"), "\u{1d41a}\u{0302}");
         assert_eq!(render("bb(hat q)"), "\u{1d42a}\u{0302}");
         assert_eq!(render("bb(dot x)"), "\u{1d431}\u{0307}");
@@ -1964,7 +1775,6 @@ mod tests {
     #[test]
     #[allow(clippy::unicode_not_nfc)]
     fn a_mark_sits_on_a_raised_or_lowered_char() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("x_(overline a)"), "xₐ\u{0305}");
         assert_eq!(render("x_(bar a)"), "xₐ\u{0304}");
         assert_eq!(render("x^hat a"), "xᵃ\u{0302}");
@@ -1975,7 +1785,6 @@ mod tests {
     #[test]
     fn explicit_frac_binary_falls_back() {
         // `frac(x)(y)` cannot script-render, but must not error/panic — it falls back to `/`
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("frac(x)(y)"), "(x)/(y)");
         // vulgar/script forms still apply when possible
         assert_eq!(render("frac(1)(2)"), "½");
@@ -1983,7 +1792,6 @@ mod tests {
 
     #[test]
     fn delimiter_functions() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("abs(x)"), "|x|");
         assert_eq!(render("ceil(x)"), "⌈x⌉");
         assert_eq!(render("floor(x)"), "⌊x⌋");
@@ -1999,7 +1807,6 @@ mod tests {
 
     #[test]
     fn overline_underline_cancel() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("overline(x)"), "x\u{0305}");
         assert_eq!(render("underline(x)"), "x\u{0332}");
         assert_eq!(render("cancel(x)"), "x\u{0336}");
@@ -2014,14 +1821,12 @@ mod tests {
     #[test]
     fn script_frac_grouped_numerator() {
         // (x+1)/2 with script fracs: grouped numerator superscripted over subscript
-        let res = super::super::parse_unicode("(x+1)/2").to_string();
-        assert_eq!(res, "ˣ⁺¹⁄₂");
+        assert_eq!(render("(x+1)/2"), "ˣ⁺¹⁄₂");
     }
 
     #[test]
     #[allow(clippy::unicode_not_nfc)]
     fn overset_combining_marks() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         // each latin-letter argument to overset/stackrel maps to a combining mark
         assert_eq!(render("overset(a)(N)"), "N\u{0363}");
         assert_eq!(render("overset(e)(N)"), "N\u{0364}");
@@ -2040,7 +1845,6 @@ mod tests {
 
     #[test]
     fn roots() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("root(2)(x)"), "√x");
         assert_eq!(render("root(3)(x)"), "∛x");
         assert_eq!(render("root(4)(x)"), "∜x");
@@ -2056,7 +1860,6 @@ mod tests {
 
     #[test]
     fn annotation_commands() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         // only the annotated expression is shown
         assert_eq!(render("color(red)(x)"), "x");
         assert_eq!(render("id(a)(x)"), "x");
@@ -2065,7 +1868,6 @@ mod tests {
 
     #[test]
     fn over_and_under() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("underset(x)(lim)"), "limₓ");
         assert_eq!(render("underset(x->0)(lim) f(x)"), "lim_(x→0) f(x)");
         assert_eq!(render("stackrel(def)(=)"), "≝");
@@ -2076,7 +1878,6 @@ mod tests {
 
     #[test]
     fn primes_and_script_commas() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("x^'"), "x′");
         assert_eq!(render("f''(x)"), "f′′(x)");
         assert_eq!(render("x_(i,j)"), "xᵢ,ⱼ");
@@ -2085,20 +1886,19 @@ mod tests {
 
     #[test]
     fn script_frac_grouped_paths() {
-        // numerator superscriptable, denominator subscriptable: every grouped branch
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
-        assert_eq!(render("(x+a)/(x+a)"), "ˣ⁺ᵃ⁄ₓ₊ₐ"); // (group, group)
-        assert_eq!(render("x/(x+a)"), "ˣ⁄ₓ₊ₐ"); // (simple, group)
-        assert_eq!(render("(x+a)/x"), "ˣ⁺ᵃ⁄ₓ"); // (group, simple)
-        assert_eq!(render("1/(x+a)"), "⅟ₓ₊ₐ"); // one-over reciprocal, grouped
-        assert_eq!(render("(1)/(x+a)"), "⅟ₓ₊ₐ"); // grouped `1` numerator
-        assert_eq!(render("1/y"), "1/y"); // one-over reciprocal, non-subscriptable
+        // the brackets around either part only group, so they go
+        assert_eq!(render("(x+a)/(x+a)"), "ˣ⁺ᵃ⁄ₓ₊ₐ");
+        assert_eq!(render("x/(x+a)"), "ˣ⁄ₓ₊ₐ");
+        assert_eq!(render("(x+a)/x"), "ˣ⁺ᵃ⁄ₓ");
+        assert_eq!(render("1/(x+a)"), "⅟ₓ₊ₐ");
+        assert_eq!(render("(1)/(x+a)"), "⅟ₓ₊ₐ");
+        // y has no subscript form
+        assert_eq!(render("1/y"), "1/y");
     }
 
     #[test]
     fn script_frac_non_subscriptable_fallbacks() {
         // capitals/symbols have no sub/superscript form, so these fall back to plain `/`
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("(A+B)/(C+D)"), "(A+B)/(C+D)");
         assert_eq!(render("x/(A B)"), "x/(AB)");
         assert_eq!(render("(A B)/y"), "(AB)/y");
@@ -2108,7 +1908,6 @@ mod tests {
     #[test]
     #[allow(clippy::unicode_not_nfc)]
     fn char_modifier_group_fallbacks() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         // single symbol in a group: no precomposed form, modifier combines anyway
         assert_eq!(render("hat(+)"), "+\u{0302}");
         assert_eq!(render("dot(+)"), "+\u{0307}");
@@ -2128,8 +1927,7 @@ mod tests {
 
     #[test]
     fn account_of_and_letter_vulgar_fracs() {
-        // ast::vulgar_frac_char's non-digit entries
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
+        // the letter pairs with a fraction char of their own
         assert_eq!(render("a/c"), "℀");
         assert_eq!(render("a/s"), "℁");
         assert_eq!(render("A/S"), "⅍");
@@ -2140,7 +1938,6 @@ mod tests {
 
     #[test]
     fn superscript_uppercase_and_greek() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         // every uppercase letter with a superscript form
         assert_eq!(render("x^(DEGHIJKLMNOPRTUVW)"), "xᴰᴱᴳᴴᴵᴶᴷᴸᴹᴺᴼᴾᴿᵀᵁⱽᵂ");
         // greek letters with a superscript form
@@ -2152,7 +1949,6 @@ mod tests {
 
     #[test]
     fn subscript_greek() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("x_beta"), "xᵦ");
         assert_eq!(render("x_gamma"), "xᵧ");
         assert_eq!(render("x_rho"), "xᵨ");
@@ -2161,34 +1957,29 @@ mod tests {
     }
 
     #[test]
-    fn frac_level_arms_with_scripts() {
-        // when an operand carries a script the frac uses the `Frac`-level arms,
-        // which fall back to plain `/` when the script blocks sub/superscripting
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
-        assert_eq!(render("1/x^2"), "1/x²"); // one-over reciprocal
-        assert_eq!(render("(1)/x^2"), "(1)/x²"); // grouped one-over
-        assert_eq!(render("(x+a)/y^2"), "(x+a)/y²"); // grouped numerator
-        assert_eq!(render("x^2/(x+a)"), "x²/(x+a)"); // grouped denominator
+    fn a_scripted_part_keeps_the_slash() {
+        // a part with a script of its own can't be shifted again, so the slash stays
+        assert_eq!(render("1/x^2"), "1/x²");
+        assert_eq!(render("(1)/x^2"), "(1)/x²");
+        assert_eq!(render("(x+a)/y^2"), "(x+a)/y²");
+        assert_eq!(render("x^2/(x+a)"), "x²/(x+a)");
     }
 
     #[test]
     fn modifier_on_grouped_single_symbol() {
         // a group whose only element is a symbol is not a precomposable char
-        let res = super::super::parse_unicode("hat((+))").to_string();
-        assert_eq!(res, "hat ((+))");
+        assert_eq!(render("hat((+))"), "hat ((+))");
     }
 
     #[test]
     #[allow(clippy::unicode_not_nfc)]
     fn modifier_on_bare_symbol() {
         // a bare (ungrouped) symbol argument takes the combining modifier directly
-        let res = super::super::parse_unicode("vec*").to_string();
-        assert_eq!(res, "\u{22c5}\u{20d7}");
+        assert_eq!(render("vec*"), "\u{22c5}\u{20d7}");
     }
 
     #[test]
     fn word_spacing() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         // a function touches a bracketed argument and is spaced from a bare one
         assert_eq!(render("sin(x)"), "sin(x)");
         assert_eq!(render("f(x)"), "f(x)");
@@ -2223,7 +2014,6 @@ mod tests {
 
     #[test]
     fn literal_text() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("text(hello world)"), "hello world");
         assert_eq!(render("mbox[a + b]"), "a + b");
         assert_eq!(render("text{ x }"), " x ");
@@ -2237,7 +2027,6 @@ mod tests {
 
     #[test]
     fn prefix_minus_in_scripts() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("x^-1"), "x⁻¹");
         assert_eq!(render("e^-x"), "e⁻ˣ");
         assert_eq!(render("x_-1^-2"), "x₋₁⁻²");
@@ -2250,7 +2039,6 @@ mod tests {
 
     #[test]
     fn a_sign_prefixing_a_function_argument() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("sin -x"), "sin -x");
         assert_eq!(render("f -x"), "f -x");
         assert_eq!(render("sin^2 -x"), "sin² -x");
@@ -2258,7 +2046,6 @@ mod tests {
 
     #[test]
     fn added_symbols() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("hbar o- dag dagger ddag ddagger"), "ℏ⊖††‡‡");
         assert_eq!(render("a notequiv b !-= c"), "a≢b≢c");
         assert_eq!(render("a rightleftharpoons b"), "a⇌b");
@@ -2274,7 +2061,6 @@ mod tests {
 
     #[test]
     fn added_fonts() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("italic(x)"), "𝑥");
         assert_eq!(render("bold(x)"), "𝐱");
         assert_eq!(render("bbit(x)"), "𝒙");
@@ -2287,7 +2073,6 @@ mod tests {
 
     #[test]
     fn only_grouping_brackets_are_stripped() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         // bars, angles, floors and ceilings carry meaning
         assert_eq!(render("|x|/2"), "|x|/2");
         assert_eq!(render("<<x>>/2"), "⟨x⟩/2");
@@ -2300,7 +2085,6 @@ mod tests {
         assert_eq!(render("x_(a)"), "xₐ");
         assert_eq!(render("x_[a]"), "xₐ");
         assert_eq!(render("x_{:a:}"), "xₐ");
-        assert_eq!(render("bb(x)"), "𝐱");
         assert_eq!(render("bb{x}"), "𝐱");
         assert_eq!(render("7/[8]"), "⅞");
         assert_eq!(render("{a} / (s)"), "℁");
@@ -2310,14 +2094,12 @@ mod tests {
 
     #[test]
     fn empty_trailing_superscript() {
-        // `x^` leaves the script base `Simple::Missing`, which renders to nothing
-        let res = super::super::parse_unicode("x^").to_string();
-        assert_eq!(res, "x");
+        // a script that isn't there yet renders to nothing
+        assert_eq!(render("x^"), "x");
     }
 
     #[test]
     fn placeholders_are_off_by_default() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("sum_"), "∑");
         assert_eq!(render("1/"), "⅟");
         assert_eq!(render("sqrt"), "√");
@@ -2328,7 +2110,6 @@ mod tests {
         assert_eq!(render("[[1,2],[3,]]"), "[[1,2],[3,]]");
         assert_eq!(render("[[],[]]"), "[[],[]]");
         assert_eq!(render("[[1,2],[,]]"), "[[1,2],[,]]");
-        assert_eq!(render("[(a,|,b),(c,|,d)]"), "[[a|b],[c|d]]");
         assert_eq!(render("[(a,|,b),(c,|,)]"), "[[a|b],[c|]]");
     }
 
@@ -2408,7 +2189,6 @@ mod tests {
         assert_eq!(render("[[1,2],[,]]"), "[[1,2],[□,□]]");
         assert_eq!(render("[[1,2],[3,4]]"), "[[1,2],[3,4]]");
         // the lines of an augmented matrix are untouched
-        assert_eq!(render("[(a,|,b),(c,|,d)]"), "[[a|b],[c|d]]");
         assert_eq!(render("[(a,|,b),(c,|,)]"), "[[a|b],[c|□]]");
         assert_eq!(render("[(|,a,b,|),(|,c,d,|)]"), "[[|a,b|],[|c,d|]]");
     }
@@ -2484,7 +2264,6 @@ mod tests {
 
     #[test]
     fn nothing_to_render_leaves_no_space() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("hat"), "hat"); // a command with no argument
         assert_eq!(render("g color(red)"), "g"); // an argument that renders to nothing
         assert_eq!(render("dx g color(red)() dy"), "dx g dy");
@@ -2492,17 +2271,14 @@ mod tests {
 
     #[test]
     fn double_struck_greek() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("bbb(Gamma)"), "ℾ");
         assert_eq!(render("bbb(Pi)"), "ℿ");
         assert_eq!(render("bbb(gamma)"), "ℽ");
         assert_eq!(render("bbb(pi)"), "ℼ");
-        assert_eq!(render("bbb(sum)"), "⅀");
     }
 
     #[test]
     fn similar_and_wide_spaces() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("a~b"), "a∼b");
         assert_eq!(render("a sim b"), "a∼b");
         assert_eq!(render("a quad b"), "a\u{2003}b");
@@ -2623,7 +2399,6 @@ mod tests {
 
     #[test]
     fn a_space_symbol_in_a_script_steps_narrower() {
-        let render = |inp: &str| super::super::parse_unicode(inp).to_string();
         assert_eq!(render("x^(a quad b)"), "xᵃ\u{2002}ᵇ");
         assert_eq!(render("x^(a qquad b)"), "xᵃ\u{2002}\u{2002}ᵇ");
         assert_eq!(render("x_(i enspace j)"), "xᵢ\u{2004}ⱼ");

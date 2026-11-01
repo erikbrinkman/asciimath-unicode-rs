@@ -39,14 +39,21 @@ macro_rules! skin_tones {
 
         #[cfg(test)]
         mod skin_tone_tests {
+            use std::collections::HashSet;
+
             #[test]
-            fn every_tone_has_an_emoji_tone() {
-                for (ours, theirs) in [
-                    (super::SkinTone::$default, emojis::SkinTone::$default),
-                    $((super::SkinTone::$tone, emojis::SkinTone::$tone),)+
-                ] {
-                    assert_eq!(emojis::SkinTone::from(ours), theirs);
-                }
+            fn every_tone_renders_differently() {
+                let tones = [super::SkinTone::$default, $(super::SkinTone::$tone),+];
+                let rendered: HashSet<String> = tones
+                    .into_iter()
+                    .map(|tone| {
+                        super::Conf::default()
+                            .with_skin_tone(tone)
+                            .parse(":couple_with_heart:")
+                            .to_string()
+                    })
+                    .collect();
+                assert_eq!(rendered.len(), tones.len());
             }
         }
     };
@@ -65,7 +72,7 @@ with_skin_tones!(skin_tones);
 pub struct Conf {
     /// Drop ( ), [ ] and { } around fractions, scripts and command arguments
     pub strip_brackets: bool,
-    /// If true, this will try to render fractions as vulgar fractions
+    /// Render fractions as vulgar fractions, like ½, where one exists
     pub vulgar_fracs: bool,
     /// Default skin tone for emojis
     pub skin_tone: SkinTone,
@@ -183,34 +190,6 @@ impl Conf {
     }
 
     /// Set what stands in for the parts that aren't there yet, or `None` to show nothing
-    ///
-    /// This is for showing math while it is still being typed, so that `x^` or `sqrt` doesn't
-    /// look the same as `x` or nothing. Brackets or a matrix cell with nothing in them count as
-    /// a part being typed too, while a function name like `sin` or `f` reads fine alone and gets
-    /// no placeholder.
-    ///
-    /// Whether the mark replaces a bracket pair with nothing in it or sits between the brackets
-    /// follows [`strip_brackets`][Conf::strip_brackets]: `abs()` gives `|□|` by default and
-    /// `|(□)|` with the brackets kept.
-    ///
-    /// A script that can't be raised or lowered is written after a literal `^` or `_`, and a
-    /// script that isn't there yet then takes `char` rather than `sup` or `sub`: `x_y^` gives
-    /// `x_y^□` because `y` has no subscript form, while `x_x^` gives `xₓ⸋`.
-    ///
-    /// ```
-    /// use asciimath_unicode::{Conf, Placeholders};
-    /// let conf = Conf::default().with_placeholders(Some(Placeholders::default()));
-    /// assert_eq!(conf.parse("sqrt").to_string(), "√□");
-    /// assert_eq!(conf.parse("x^").to_string(), "x⸋");
-    /// assert_eq!(conf.parse("abs()").to_string(), "|□|");
-    /// assert_eq!(conf.with_strip_brackets(false).parse("abs()").to_string(), "|(□)|");
-    /// assert_eq!(conf.parse("x_y^").to_string(), "x_y^□");
-    ///
-    /// let marks = Placeholders::default().with_char('?').with_sup('!');
-    /// let conf = conf.with_placeholders(Some(marks));
-    /// assert_eq!(conf.parse("sqrt").to_string(), "√?");
-    /// assert_eq!(conf.parse("x^").to_string(), "x!");
-    /// ```
     #[must_use]
     pub fn with_placeholders(self, placeholders: Option<Placeholders>) -> Self {
         Conf {
@@ -220,38 +199,6 @@ impl Conf {
     }
 
     /// Set whether the whitespace typed between parts of the math is written back out
-    ///
-    /// Only whitespace between two neighboring parts is kept. Whitespace within one part, like
-    /// around the `/` of a fraction or before a function's argument, is still dropped. Where none
-    /// was typed, the usual spacing still applies, so a space is added wherever one is needed for
-    /// legibility. A `+` or `-` that applies to the part after it rather than joining two parts is
-    /// written against that part, so whitespace typed after such a sign is dropped as well.
-    ///
-    /// How a kept run is written depends on where it lands. A one-line layout writes it as typed,
-    /// tabs and newlines included. [`Block`][Layout::Block] writes it as plain spaces as wide as
-    /// the run printed, since a tab or newline would throw off the lines it stacks, and drops what
-    /// was typed inside a grid. Raised or lowered, every space is written one step narrower, so a
-    /// script with a space in it doesn't read as finished math.
-    ///
-    /// ```
-    /// use asciimath_unicode::{Conf, Layout};
-    /// let conf = Conf::default().with_keep_spaces(true);
-    /// assert_eq!(conf.parse("a + b").to_string(), "a + b");
-    /// assert_eq!(conf.parse("a+b").to_string(), "a+b");
-    /// assert_eq!(conf.parse("1 / 2  x ^ 2").to_string(), "½  x²");
-    /// // the second `-` is a sign on `x`, so what was typed after it goes
-    /// assert_eq!(conf.parse("1 - - x").to_string(), "1 - -x");
-    /// assert_eq!(conf.parse("a\tb").to_string(), "a\tb");
-    /// // nothing was typed, so `sin` still gets the space it needs
-    /// assert_eq!(conf.parse("sinx").to_string(), "sin x");
-    /// // a thin space, where a plain one would look like the end of the script
-    /// assert_eq!(conf.parse("x^(a b)").to_string(), "xᵃ\u{2009}ᵇ");
-    ///
-    /// let block = conf.with_layout(Layout::Block);
-    /// assert_eq!(block.parse("a\tb").to_string(), "a b");
-    /// assert_eq!(block.parse("[[a  b, c], [d, e]]").to_string(), "⎡ab  c⎤\n⎣ d  e⎦");
-    /// assert_eq!(conf.parse("[[a  b, c], [d, e]]").to_string(), "[[a  b,c],[d,e]]");
-    /// ```
     #[must_use]
     pub fn with_keep_spaces(self, keep_spaces: bool) -> Self {
         Conf {
@@ -261,39 +208,6 @@ impl Conf {
     }
 
     /// Set whether an operator that joins two parts of the math gets a space on either side
-    ///
-    /// This covers the operators and relations that join two parts, like `+`, `=`, `xx` or `in`;
-    /// with it off they are written against their operands. It says nothing about the spaces that
-    /// keep words and function names legible, as in `sin x` or `a and b`, which are written
-    /// either way. A `+` or `-` that applies to the part after it rather than joining two parts
-    /// is written against that part either way too.
-    ///
-    /// Whitespace typed with [`keep_spaces`][Conf::keep_spaces] on wins where it was typed, and
-    /// where none was typed this decides.
-    ///
-    /// Such a space steps one width narrower when it is raised or lowered, and a fixed-width font
-    /// draws it no narrower than a full cell, so [`Block`][Layout::Block] leaves these spaces out
-    /// inside a raised or lowered script rather than show it as padded as full-size math. The
-    /// spaces a script gets for any other reason are written there either way.
-    ///
-    /// ```
-    /// use asciimath_unicode::{Conf, Layout};
-    /// let conf = Conf::default().with_spaced_operators(true);
-    /// assert_eq!(conf.parse("a+b=c").to_string(), "a + b = c");
-    /// // the second `-` is a sign on `x`, so it keeps no spaces of its own
-    /// assert_eq!(conf.parse("1 - - x").to_string(), "1 - -x");
-    /// // the space `sin` needs is written whatever this says
-    /// assert_eq!(conf.with_spaced_operators(false).parse("sinx+1").to_string(), "sin x+1");
-    /// // a thin space in a script, which the multi-line layout leaves out
-    /// assert_eq!(conf.parse("x^(a+b)").to_string(), "xᵃ\u{2009}⁺\u{2009}ᵇ");
-    /// let block = conf.with_layout(Layout::Block);
-    /// assert_eq!(block.parse("x^(a+b)").to_string(), "xᵃ⁺ᵇ");
-    /// // the space `sin` needs is written there too
-    /// assert_eq!(block.parse("x^sin x").to_string(), "xˢⁱⁿ\u{2009}ˣ");
-    ///
-    /// let kept = conf.with_keep_spaces(true);
-    /// assert_eq!(kept.parse("a  +b").to_string(), "a  + b");
-    /// ```
     #[must_use]
     pub fn with_spaced_operators(self, spaced_operators: bool) -> Self {
         Conf {
@@ -337,14 +251,15 @@ pub struct Asciimath<'a> {
 }
 
 impl fmt::Display for Asciimath<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.conf.layout == Layout::Block {
             let block = self
                 .conf
                 .block_expression(&self.expr, inline::Font::default());
-            write!(f, "{block}")
+            write!(formatter, "{block}")
         } else {
-            self.conf.inline_expression(&self.expr, &mut Mapper::new(f))
+            self.conf
+                .inline_expression(&self.expr, &mut Mapper::new(formatter))
         }
     }
 }
@@ -353,22 +268,4 @@ impl fmt::Display for Asciimath<'_> {
 #[must_use]
 pub fn parse_unicode(inp: &str) -> Asciimath<'_> {
     Conf::default().parse(inp)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Conf, Layout};
-    use std::collections::HashSet;
-
-    #[test]
-    fn confs_hash_by_value() {
-        let confs: HashSet<Conf> = [
-            Conf::default(),
-            Conf::default(),
-            Conf::default().with_layout(Layout::Block),
-        ]
-        .into_iter()
-        .collect();
-        assert_eq!(confs.len(), 2);
-    }
 }

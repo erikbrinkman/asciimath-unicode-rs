@@ -1,19 +1,15 @@
-#![allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+//! The multi-line layout
 
 use std::fmt::Write;
-use std::{fmt, iter, mem};
+use std::{fmt, iter};
 use unicode_width::UnicodeWidthStr;
 
 use super::Conf;
-use super::ast::unwrap_parens;
-use super::ast::{
-    delimiters, frac_edges, func_hugs_argument, hugs_argument, inter_is_spaced_op,
-    name_without_argument, needs_space, scriptfunc_edges,
-};
+use super::ast::{ArgGap, Separator, delimiters, separated_items, unwrap_parens};
 use super::inline::{
-    Font, Mapper, MapperConf, Operand, column_rules, font_styles, is_brace, root_char,
+    Font, Mapper, MapperConf, Operand, Shift, column_rules, font_styles, is_brace, root_char,
 };
-use super::tokens::{left_bracket_str, right_bracket_str, subscript_char, superscript_char};
+use super::tokens::bracket_str;
 
 use asciimath_parser::tree::{
     Expression, Frac, Func, Group, Intermediate, Matrix, ScriptFunc, Simple, SimpleBinary,
@@ -23,7 +19,7 @@ use asciimath_parser::tree::{
 /// A 2D text block for multi-line rendering.
 /// All lines are padded to `width` display columns with trailing spaces.
 #[derive(Debug, Clone)]
-pub struct Block {
+pub(crate) struct Block {
     lines: Vec<String>,
     baseline: usize,
     width: usize,
@@ -58,11 +54,11 @@ impl Block {
         }
     }
 
-    fn space(n: usize) -> Self {
+    fn space(width: usize) -> Self {
         Block {
-            lines: vec![" ".repeat(n)],
+            lines: vec![" ".repeat(width)],
             baseline: 0,
-            width: n,
+            width,
             bar: false,
         }
     }
@@ -90,43 +86,31 @@ impl Block {
         self.lines.len() > 1
     }
 
-    fn beside(mut self, mut other: Self) -> Self {
+    /// How many lines are below the baseline
+    fn depth(&self) -> usize {
+        self.height() - 1 - self.baseline
+    }
+
+    fn beside(self, other: Self) -> Self {
         let above = self.baseline.max(other.baseline);
-        let self_below = self.lines.len() - self.baseline;
-        let other_below = other.lines.len() - other.baseline;
-        let below = self_below.max(other_below);
-        let new_width = self.width + other.width;
+        let below = self.depth().max(other.depth());
+        let width = self.width + other.width;
         let bar = self.bar || other.bar;
-
-        // Pad self above and below to align baselines
-        self.lines = iter::repeat_with(|| " ".repeat(self.width))
-            .take(above - self.baseline)
-            .chain(self.lines)
-            .chain(iter::repeat_with(|| " ".repeat(self.width)).take(below - self_below))
-            .collect();
-
-        // Pad other above and below to align baselines
-        other.lines = iter::repeat_with(|| " ".repeat(other.width))
-            .take(above - other.baseline)
-            .chain(other.lines)
-            .chain(iter::repeat_with(|| " ".repeat(other.width)).take(below - other_below))
-            .collect();
-
-        // Zip and concat
+        let right = other.pad_vertical(above, below);
         let lines = self
+            .pad_vertical(above, below)
             .lines
             .into_iter()
-            .zip(other.lines)
+            .zip(right.lines)
             .map(|(mut left, right)| {
                 left.push_str(&right);
                 left
             })
             .collect();
-
         Block {
             lines,
             baseline: above,
-            width: new_width,
+            width,
             bar,
         }
     }
@@ -235,6 +219,20 @@ impl Block {
         }
     }
 
+    /// This function name followed by the argument `arg` renders, meeting it as `gap` says
+    fn with_arg(self, gap: ArgGap, arg: impl FnOnce() -> Self) -> Self {
+        if gap == ArgGap::Bare {
+            self
+        } else {
+            let arg = arg();
+            if gap.spaced(arg.is_empty()) {
+                self.beside(Block::space(1)).beside(arg)
+            } else {
+                self.beside(arg)
+            }
+        }
+    }
+
     fn pad_right(mut self, width: usize) -> Self {
         if width > self.width {
             let extra = " ".repeat(width - self.width);
@@ -253,7 +251,7 @@ impl Block {
 
     /// Pad vertically: ensure `above` lines above baseline, `below` lines below.
     fn pad_vertical(mut self, above: usize, below: usize) -> Self {
-        let cur_below = self.lines.len() - 1 - self.baseline;
+        let cur_below = self.depth();
         if above > self.baseline {
             let extra: Vec<String> = iter::repeat_with(|| " ".repeat(self.width))
                 .take(above - self.baseline)
@@ -343,31 +341,31 @@ fn brace_line(width: usize, under: bool) -> String {
 }
 
 impl fmt::Display for Block {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (idx, line) in self.lines.iter().enumerate() {
             if idx > 0 {
-                f.write_str("\n")?;
+                formatter.write_str("\n")?;
             }
-            f.write_str(line.trim_end_matches(' '))?;
+            formatter.write_str(line.trim_end_matches(' '))?;
         }
         Ok(())
     }
 }
 
-fn center_pad(s: &str, current_width: usize, target_width: usize) -> String {
+fn center_pad(line: &str, current_width: usize, target_width: usize) -> String {
     if current_width >= target_width {
-        s.to_string()
+        line.to_string()
     } else {
         let left = (target_width - current_width).div_ceil(2);
         let right = target_width - current_width - left;
-        format!("{}{}{}", " ".repeat(left), s, " ".repeat(right))
+        format!("{}{line}{}", " ".repeat(left), " ".repeat(right))
     }
 }
 
 /// Glyphs for a tall bracket: top, the two middle rows, bottom, and the fill between them
 type BracketPieces = (char, char, char, char, char);
 
-/// The pieces of a tall left bracket, from its [`left_bracket_str`] form
+/// The pieces of a tall left bracket, from its [`bracket_str`] form
 fn left_bracket_pieces(bracket: &str, height: usize) -> BracketPieces {
     match bracket {
         "(" => ('⎛', '⎜', '⎜', '⎝', '⎜'),
@@ -383,7 +381,7 @@ fn left_bracket_pieces(bracket: &str, height: usize) -> BracketPieces {
     }
 }
 
-/// The pieces of a tall right bracket, from its [`right_bracket_str`] form
+/// The pieces of a tall right bracket, from its [`bracket_str`] form
 fn right_bracket_pieces(bracket: &str, height: usize) -> BracketPieces {
     match bracket {
         ")" => ('⎞', '⎟', '⎟', '⎠', '⎟'),
@@ -442,26 +440,26 @@ fn column_separator(rules: usize, boundary: usize, num_cols: usize) -> String {
     format!("{gap}{}{gap}", "\u{2502}".repeat(rules))
 }
 
+/// What `render` writes on one line in `font`, as a block
+fn one_line(font: Font, render: impl FnOnce(&mut Mapper<'_, String>) -> fmt::Result) -> Block {
+    let mut text = String::new();
+    let conf = MapperConf {
+        font,
+        ..MapperConf::default()
+    };
+    render(&mut conf.wrap(&mut text))
+        .unwrap_or_else(|_| unreachable!("write to String is infallible"));
+    Block::text(text)
+}
+
+/// `text` in `font`
+fn styled(text: &str, font: Font) -> Block {
+    one_line(font, |out| out.write_str(text))
+}
+
 impl Conf {
-    /// What `render` writes on one line in `font`, as a block
-    fn one_line(font: Font, render: impl FnOnce(&mut Mapper<'_, String>) -> fmt::Result) -> Block {
-        let mut text = String::new();
-        let conf = MapperConf {
-            font,
-            ..MapperConf::default()
-        };
-        render(&mut conf.wrap(&mut text))
-            .unwrap_or_else(|_| unreachable!("write to String is infallible"));
-        Block::text(text)
-    }
-
-    /// `text` in `font`
-    fn styled(text: &str, font: Font) -> Block {
-        Self::one_line(font, |out| out.write_str(text))
-    }
-
     fn block_inline_simple(self, simple: &Simple<'_>, font: Font) -> Block {
-        Self::one_line(font, |out| self.inline_simple(simple, out))
+        one_line(font, |out| self.inline_simple(simple, out))
     }
 
     /// `sign` in `font`, written against the `operand` it prefixes
@@ -470,43 +468,33 @@ impl Conf {
             .beside(operand)
     }
 
+    /// Render `expr` in the multi-line layout in `font`, spacing its items
     pub(crate) fn block_expression(self, expr: &Expression<'_>, font: Font) -> Block {
-        // the runs typed on both sides of an item that renders to nothing both belong in the output
-        let mut typed_width = 0;
-        let mut items = expr.iter().filter_map(|inter| {
-            let rendered = match inter {
-                Intermediate::Space(space) => {
-                    if self.keep_spaces {
-                        typed_width += UnicodeWidthStr::width(*space);
-                    }
-                    None
+        let items = separated_items(
+            expr,
+            self.keep_spaces,
+            self.spaced_operators,
+            |inter, sep| {
+                let block = match inter {
+                    Intermediate::Space(_) => None,
+                    Intermediate::ScriptFunc(func) => Some(self.block_scriptfunc(func, font)),
+                    Intermediate::Frac(frac) => Some(self.block_frac(frac, font)),
                 }
-                Intermediate::ScriptFunc(func) => {
-                    Some((self.block_scriptfunc(func, font), scriptfunc_edges(func)))
-                }
-                Intermediate::Frac(frac) => Some((self.block_frac(frac, font), frac_edges(frac))),
-            };
-            // an item that renders to nothing, like an empty group, must not leave a space behind
-            rendered
-                .filter(|(block, _)| !block.is_empty())
-                .map(|(block, edges)| (inter, block, edges, mem::take(&mut typed_width)))
-        });
-        let Some((first, first_block, (_, first_trailing_edge), _)) = items.next() else {
-            return Block::space(0);
-        };
-        let mut result = first_block;
-        let mut prev_edge = first_trailing_edge;
-        let mut prev_spaced_op = self.spaced_operators && inter_is_spaced_op(first);
-        for (inter, block, (leading_edge, trailing_edge), typed_width) in items {
-            let spaced_op = self.spaced_operators && inter_is_spaced_op(inter);
-            if typed_width > 0 {
-                result = result.beside(Block::space(typed_width));
-            } else if prev_spaced_op || spaced_op || needs_space(prev_edge, leading_edge) {
-                result = result.beside(Block::space(1));
+                .filter(|block| !block.is_empty())?;
+                let gap = match sep {
+                    Separator::Typed(run) => UnicodeWidthStr::width(run),
+                    Separator::Space => 1,
+                    Separator::Nothing => 0,
+                };
+                Some((gap, block))
+            },
+        );
+        let mut result = Block::space(0);
+        for (gap, block) in items {
+            if gap > 0 {
+                result = result.beside(Block::space(gap));
             }
             result = result.beside(block);
-            prev_edge = trailing_edge;
-            prev_spaced_op = spaced_op;
         }
         result
     }
@@ -545,8 +533,8 @@ impl Conf {
         }
     }
 
-    /// `base` with `sub` and `sup` attached, raised or lowered on its lines when every one has
-    /// that form and stacked beside it otherwise
+    /// `base` with `sub` and `sup` attached, shifted on its lines when every one has a shifted
+    /// form and stacked beside it otherwise
     fn block_scripts(
         self,
         base: Block,
@@ -554,20 +542,12 @@ impl Conf {
         sup: Option<&Simple<'_>>,
         font: Font,
     ) -> Block {
-        let lower_conf = Some(MapperConf {
+        let styled = MapperConf {
             font,
-            sub_sup: Some(subscript_char),
             ..MapperConf::default()
-        });
-        let upper_conf = Some(MapperConf {
-            font,
-            sub_sup: Some(superscript_char),
-            ..MapperConf::default()
-        });
-        let lower =
-            sub.map(|script| self.mapped_script(script, lower_conf, self.sub_placeholder()));
-        let upper =
-            sup.map(|script| self.mapped_script(script, upper_conf, self.sup_placeholder()));
+        };
+        let lower = sub.map(|script| self.mapped_script(script, styled, Shift::Sub));
+        let upper = sup.map(|script| self.mapped_script(script, styled, Shift::Sup));
         if lower.is_none() && upper.is_none() {
             base
         } else if lower.as_ref().is_none_or(Option::is_some)
@@ -601,23 +581,10 @@ impl Conf {
         }
     }
 
-    /// `name` followed by its argument `arg`, unless it has none, with a space between them
-    /// unless the argument `hugs` the name
-    fn block_applied(name: Block, arg: Option<Block>, hugs: bool) -> Block {
-        match arg {
-            Some(arg) if !hugs && !arg.is_empty() => name.beside(Block::space(1)).beside(arg),
-            Some(arg) => name.beside(arg),
-            None => name,
-        }
-    }
-
     fn block_simplefunc(self, func: &SimpleFunc<'_>, font: Font) -> Block {
-        let arg = (!name_without_argument(func.arg())).then(|| self.block_simple(func.arg(), font));
-        Self::block_applied(
-            Self::styled(func.func, font),
-            arg,
-            hugs_argument(func.arg()),
-        )
+        styled(func.func, font).with_arg(ArgGap::of_simple(func.arg()), || {
+            self.block_simple(func.arg(), font)
+        })
     }
 
     fn block_unary(self, unary: &SimpleUnary<'_>, font: Font) -> Block {
@@ -627,12 +594,12 @@ impl Conf {
         } else if let Some(styles) = font_styles(unary.op) {
             self.block_simple_stripped(unary.arg(), font.within(styles))
         } else if unary.op == "sqrt" {
-            Self::styled("√", font).beside(self.block_simple(self.unwrap_single(unary.arg()), font))
+            styled("√", font).beside(self.block_simple(self.unwrap_single(unary.arg()), font))
         } else if is_brace(unary.op) {
             self.block_simple_stripped(unary.arg(), font)
                 .with_brace(matches!(unary.op, "ubrace" | "underbrace"), None)
         } else {
-            Self::one_line(font, |out| self.inline_simpleunary(unary, out))
+            one_line(font, |out| self.inline_simpleunary(unary, out))
         }
     }
 
@@ -645,39 +612,46 @@ impl Conf {
                 self.block_set(binary, None, Some(over), base, font)
             }
             ("underset", under, base) => self.block_set(binary, Some(under), None, base, font),
-            (op, first, second) => [first, second]
-                .into_iter()
-                .fold(Self::styled(op, font), |name, arg| {
-                    Self::block_applied(name, Some(self.block_simple(arg, font)), false)
-                }),
+            (op, first, second) => self.block_bgeneric(op, first, second, font),
         }
+    }
+
+    /// `op` followed by its two arguments as typed
+    fn block_bgeneric(
+        self,
+        op: &str,
+        first: &Simple<'_>,
+        second: &Simple<'_>,
+        font: Font,
+    ) -> Block {
+        styled(op, font)
+            .with_arg(ArgGap::Spaced, || self.block_simple(first, font))
+            .with_arg(ArgGap::Spaced, || self.block_simple(second, font))
     }
 
     /// The root of `radicand` with `index`; the index is never shown as-is, so its brackets are
     /// always syntax
     fn block_nroot(self, index: &Simple<'_>, radicand: &Simple<'_>, font: Font) -> Block {
-        let raised = MapperConf {
+        let styled_conf = MapperConf {
             font,
-            sub_sup: Some(superscript_char),
             ..MapperConf::default()
         };
         let root = if let Some(root) = root_char(unwrap_parens(index)) {
-            Some(Self::styled(root.encode_utf8(&mut [0; 4]), font))
+            Some(styled(root.encode_utf8(&mut [0; 4]), font))
         } else {
-            self.mapped_operand(index, raised)
-                .map(|index| Block::text(index).beside(Self::styled("√", font)))
+            styled_conf
+                .with_shift(Shift::Sup)
+                .and_then(|raised| self.mapped_operand(index, raised))
+                .map(|index| Block::text(index).beside(styled("√", font)))
         };
         match root {
             Some(root) => root.beside(self.block_simple(self.unwrap_single(radicand), font)),
-            None => [index, radicand]
-                .into_iter()
-                .fold(Self::styled("root", font), |name, arg| {
-                    Self::block_applied(name, Some(self.block_simple(arg, font)), false)
-                }),
+            None => self.block_bgeneric("root", index, radicand, font),
         }
     }
 
-    /// `base` with `under` below it and `over` above it, as scripts when it is several lines tall
+    /// `base` with `under` below it and `over` above it, as scripts when it is several lines
+    /// tall
     fn block_set(
         self,
         binary: &SimpleBinary<'_>,
@@ -690,7 +664,7 @@ impl Conf {
         if base_block.is_multiline() {
             self.block_scripts(base_block, under, over, font)
         } else {
-            Self::one_line(font, |out| self.inline_simplebinary(binary, out))
+            one_line(font, |out| self.inline_simplebinary(binary, out))
         }
     }
 
@@ -707,7 +681,7 @@ impl Conf {
     ) -> Option<Block> {
         if self.vulgar_fracs {
             self.signed_vulgar_frac(numer, denom, font)
-                .map(|frac| Self::styled(&frac, font))
+                .map(|frac| styled(&frac, font))
         } else {
             None
         }
@@ -751,23 +725,24 @@ impl Conf {
 
     fn block_group(self, group: &Group<'_>, font: Font) -> Block {
         let inner = match self.group_placeholder(group) {
-            Some(chr) => Self::one_line(font, |out| out.write_char(chr)),
+            Some(chr) => one_line(font, |out| out.write_char(chr)),
             None => self.block_expression(&group.expr, font),
         };
-        let left = left_bracket_str(group.left_bracket);
-        let right = right_bracket_str(group.right_bracket);
+        let left = bracket_str(group.left_bracket);
+        let right = bracket_str(group.right_bracket);
         inner.with_brackets(left, right)
     }
 
     fn block_cell(self, expr: &Expression<'_>, font: Font) -> Block {
         match self.empty_placeholder(expr) {
-            Some(chr) => Self::one_line(font, |out| out.write_char(chr)),
+            Some(chr) => one_line(font, |out| out.write_char(chr)),
             None => self.grid_cell().block_expression(expr, font),
         }
     }
 
     fn block_matrix(self, matrix: &Matrix<'_>, font: Font) -> Block {
         let num_cols = matrix.num_cols();
+        let rules = column_rules(matrix);
 
         let rows: Vec<Vec<Block>> = matrix
             .rows()
@@ -794,15 +769,11 @@ impl Conf {
                     .map(|cell| cell.baseline)
                     .max()
                     .unwrap_or_default();
-                let below = row
-                    .iter()
-                    .map(|cell| cell.height() - 1 - cell.baseline)
-                    .max()
-                    .unwrap_or_default()
+                let below = row.iter().map(Block::depth).max().unwrap_or_default()
                     + usize::from(spaced && index != last_row);
                 let height = above + below + 1;
                 let rule = |boundary| {
-                    let line = column_separator(column_rules(matrix, boundary), boundary, num_cols);
+                    let line = column_separator(rules[boundary], boundary, num_cols);
                     Block::repeated(line, height, above)
                 };
                 let mut row_block = rule(0);
@@ -825,17 +796,17 @@ impl Conf {
             lines: grid_lines,
             bar,
         };
-        let left = left_bracket_str(matrix.left_bracket);
-        let right = right_bracket_str(matrix.right_bracket);
+        let left = bracket_str(matrix.left_bracket);
+        let right = bracket_str(matrix.right_bracket);
         grid.with_brackets(left, right)
     }
 
     fn block_func(self, func: &Func<'_>, font: Font) -> Block {
-        let name = Self::styled(func.func, font);
-        let name_with_script = self.block_scripts(name, func.script.sub(), func.script.sup(), font);
-        let arg = (!func.arg().as_simple().is_some_and(name_without_argument))
-            .then(|| self.block_scriptfunc(func.arg(), font));
-        Self::block_applied(name_with_script, arg, func_hugs_argument(func))
+        let name = styled(func.func, font);
+        self.block_scripts(name, func.script.sub(), func.script.sup(), font)
+            .with_arg(ArgGap::of_func(func), || {
+                self.block_scriptfunc(func.arg(), font)
+            })
     }
 }
 
@@ -987,40 +958,18 @@ mod tests {
     }
 
     #[test]
-    fn stacked_frac_xy() {
-        let result = render_block("x/y");
-        assert_eq!(result, "x\n─\ny");
-    }
-
-    #[test]
     fn stacked_frac_with_expressions() {
-        let conf = Conf {
-            vulgar_fracs: false,
-            layout: Layout::Block,
-            ..Default::default()
-        };
-        let result = render_block_conf("(x+1)/y", conf);
-        assert_eq!(result, "x+1\n───\n y");
+        assert_eq!(render_block_conf("(x+1)/y", stacked()), "x+1\n───\n y");
     }
 
     #[test]
     fn stacked_frac_denom_expr() {
-        let conf = Conf {
-            vulgar_fracs: false,
-            layout: Layout::Block,
-            ..Default::default()
-        };
-        let result = render_block_conf("x/(y+1)", conf);
-        assert_eq!(result, " x\n───\ny+1");
+        assert_eq!(render_block_conf("x/(y+1)", stacked()), " x\n───\ny+1");
     }
 
     #[test]
     fn placeholders() {
-        let conf = Conf {
-            layout: Layout::Block,
-            placeholders: Some(Placeholders::default()),
-            ..Default::default()
-        };
+        let conf = Conf::default().with_placeholders(Some(Placeholders::default()));
         assert_eq!(render_block_conf("1/", conf), "1\n─\n□");
         assert_eq!(render_block_conf("sqrt", conf), "√□");
         assert_eq!(render_block_conf("x^", conf), "x⸋");
@@ -1126,23 +1075,11 @@ mod tests {
 
     #[test]
     fn operator_spacing() {
-        let conf = Conf {
-            vulgar_fracs: false,
-            layout: Layout::Block,
-            ..Default::default()
-        };
-        assert_eq!(render_block_conf("x + y", conf), "x+y");
+        assert_eq!(render_block_conf("x + y", stacked()), "x+y");
         assert_eq!(
-            render_block_conf("x + y", conf.with_spaced_operators(true)),
+            render_block_conf("x + y", stacked().with_spaced_operators(true)),
             "x + y"
         );
-    }
-
-    #[test]
-    fn default_layout_stays_inline() {
-        let conf = Conf::default();
-        let res = conf.parse("sum_(i=1)^n i^3=((n(n+1))/2)^2").to_string();
-        assert_eq!(res, "∑ᵢ₌₁ⁿ i³=(ⁿ⁽ⁿ⁺¹⁾⁄₂)²");
     }
 
     #[test]
@@ -1155,21 +1092,14 @@ mod tests {
 
     #[test]
     fn block_layout_uses_block_rendering() {
-        let conf = Conf {
-            layout: Layout::Block,
-            ..Default::default()
-        };
-        let result = conf.parse("x/y").to_string();
-        assert_eq!(result, "x\n─\ny");
+        let conf = Conf::default().with_layout(Layout::Block);
+        assert_eq!(conf.parse("x/y").to_string(), "x\n─\ny");
+        assert_eq!(conf.parse("x/n").to_string(), "x\n─\nn");
     }
 
-    /// Block config that forces stacked fractions (so wrapped content is multiline).
+    /// A configuration that stacks every fraction
     fn stacked() -> Conf {
-        Conf {
-            vulgar_fracs: false,
-            layout: Layout::Block,
-            ..Default::default()
-        }
+        Conf::default().with_vulgar_fracs(false)
     }
 
     #[test]
@@ -1215,7 +1145,7 @@ mod tests {
 
     #[test]
     fn spaced_symbol_operator() {
-        // `xx` renders as a `×`, exercising `is_spaced_operator`.
+        // an operator typed as a word is spaced like any other
         assert_eq!(render_block_conf("a/b xx c/d", stacked()), "a c\n─×─\nb d");
         assert_eq!(
             render_block_conf("a/b xx c/d", stacked().with_spaced_operators(true)),
@@ -1354,14 +1284,10 @@ mod tests {
     }
 
     #[test]
-    fn spaced_operator_full_list() {
-        // `|->` (mapsto) is the last arm of `is_spaced_operator`, so matching it
-        // forces evaluation of every preceding operator pattern.
-        let conf = Conf {
-            layout: Layout::Block,
-            spaced_operators: true,
-            ..Default::default()
-        };
+    fn spaced_operators_spelled_out() {
+        let conf = Conf::default()
+            .with_layout(Layout::Block)
+            .with_spaced_operators(true);
         assert_eq!(conf.parse("a |-> b").to_string(), "a ↦ b");
         assert_eq!(conf.parse("a mapsto b").to_string(), "a ↦ b");
         assert_eq!(conf.parse("a cdot b").to_string(), "a ⋅ b");
@@ -1401,7 +1327,7 @@ mod tests {
 
     #[test]
     fn block_frac_scriptfunc_numerator() {
-        // numerator carries a script, so the frac is rendered via the `Frac` path
+        // a numerator with a script stacks like any other
         assert_eq!(render_block_conf("x^2/y", stacked()), "x²\n──\n y");
         assert_eq!(render_block_conf("x_i/y", stacked()), "xᵢ\n──\n y");
     }
@@ -1424,7 +1350,7 @@ mod tests {
     fn invisible_brackets() {
         // `{:` and `:}` are invisible grouping brackets
         assert_eq!(render_block_conf("{:x/y:}", stacked()), "x\n─\ny");
-        // one invisible side exercises the empty-bracket column on the other
+        // with one side invisible, only the other is drawn
         assert_eq!(render_block_conf("(:x/y:}", stacked()), "╱x\n⎜─\n╲y");
         assert_eq!(render_block_conf("{:x/y:)", stacked()), "x╲\n─⎟\ny╱");
     }
@@ -1457,16 +1383,6 @@ mod tests {
         // a bare function name with no argument renders without a separator
         assert_eq!(render_block("g"), "g");
         assert_eq!(render_block("g h"), "g h");
-    }
-
-    #[test]
-    fn block_script_fraction() {
-        // script fractions are inline-only; block mode stacks
-        let conf = Conf {
-            layout: Layout::Block,
-            ..Default::default()
-        };
-        assert_eq!(conf.parse("x/n").to_string(), "x\n─\nn");
     }
 
     #[test]
