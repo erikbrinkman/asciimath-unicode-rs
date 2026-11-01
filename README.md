@@ -74,26 +74,81 @@ assert_eq!(res, "x\n─\ny");
 matrix cell with nothing in it, `sub` for a subscript and `sup` for a superscript, defaulting to
 `□`, `▫` and `⸋`.
 
+`placeholders` is for showing math while it is still being typed, so that `x^` or `sqrt` doesn't
+look the same as `x` or nothing.  Brackets or a matrix cell with nothing in them count as a part
+being typed too, while a function name like `sin` or `f` reads fine alone and gets no placeholder.
 Whether the mark replaces a bracket pair with nothing in it or sits between the brackets follows
-`strip_brackets`: `abs()` renders `|□|` by default and `|(□)|` with the brackets kept.
+`strip_brackets`.  A script that can't be raised or lowered is written after a literal `^` or `_`,
+and a script that isn't there yet then takes `char` rather than `sup` or `sub`, so `x_y^` gives
+`x_y^□` because `y` has no subscript form:
 
-`keep_spaces` keeps only the whitespace between two neighboring parts, and where none was typed the
-usual spacing still applies, so `sinx` renders `sin x` either way.  A `+` or `-` that applies to the
-part after it rather than joining two parts is written against that part, so `1 - - x` renders
-`1 - -x`.  A one-line layout writes a kept run as typed, tabs and newlines included, while `Block`
-writes it as plain spaces as wide as the run printed, since a tab or newline would throw off the
-lines it stacks, and drops what was typed inside a grid.  A space that lands in a script is written
-one step narrower, so `x^(a b)` renders `xᵃ ᵇ` with a thin space rather than a full one.
+```rust
+use asciimath_unicode::{Conf, Placeholders};
+let conf = Conf::default().with_placeholders(Some(Placeholders::default()));
+assert_eq!(conf.parse("sqrt").to_string(), "√□");
+assert_eq!(conf.parse("x^").to_string(), "x⸋");
+assert_eq!(conf.parse("abs()").to_string(), "|□|");
+assert_eq!(conf.with_strip_brackets(false).parse("abs()").to_string(), "|(□)|");
+assert_eq!(conf.parse("x_y^").to_string(), "x_y^□");
+assert_eq!(conf.parse("x_x^").to_string(), "xₓ⸋");
+
+let marks = Placeholders::default().with_char('?').with_sup('!');
+let conf = conf.with_placeholders(Some(marks));
+assert_eq!(conf.parse("sqrt").to_string(), "√?");
+assert_eq!(conf.parse("x^").to_string(), "x!");
+```
+
+`keep_spaces` keeps only the whitespace between two neighboring parts.  Whitespace within one part,
+like around the `/` of a fraction or before a function's argument, is still dropped, and where none
+was typed the usual spacing still applies, so `sinx` renders `sin x` either way.  A `+` or `-` that
+applies to the part after it rather than joining two parts is written against that part, so
+whitespace typed after it is dropped too.  A one-line layout writes a kept run as typed, tabs and
+newlines included, while `Block` writes it as plain spaces as wide as the run printed, since a tab
+or newline would throw off the lines it stacks, and drops what was typed inside a grid.  A space
+that lands in a script is written one step narrower, so a script with a space in it doesn't read as
+finished math:
+
+```rust
+use asciimath_unicode::{Conf, Layout};
+let conf = Conf::default().with_keep_spaces(true);
+assert_eq!(conf.parse("a + b").to_string(), "a + b");
+assert_eq!(conf.parse("a+b").to_string(), "a+b");
+assert_eq!(conf.parse("1 / 2  x ^ 2").to_string(), "½  x²");
+assert_eq!(conf.parse("1 - - x").to_string(), "1 - -x");
+assert_eq!(conf.parse("a\tb").to_string(), "a\tb");
+assert_eq!(conf.parse("sinx").to_string(), "sin x");
+assert_eq!(conf.parse("x^(a b)").to_string(), "xᵃ\u{2009}ᵇ");
+
+let block = conf.with_layout(Layout::Block);
+assert_eq!(block.parse("a\tb").to_string(), "a b");
+assert_eq!(block.parse("[[a  b, c], [d, e]]").to_string(), "⎡ab  c⎤\n⎣ d  e⎦");
+assert_eq!(conf.parse("[[a  b, c], [d, e]]").to_string(), "[[a  b,c],[d,e]]");
+```
 
 `spaced_operators` puts a space on either side of an operator that joins two parts of the math,
-like `+`, `=`, `xx` or `in`, so `a+b=c` renders `a + b = c`.  It says nothing about the spaces that
-keep words and function names legible, so `sinx` renders `sin x` either way, and a sign on the part
-after it is still written against that part.  Whitespace typed with `keep_spaces` on wins where it
-was typed, and where none was typed this decides, so `a  +b` renders `a  + b`.  Such a space steps
-one width narrower when it lands in a script, and a fixed-width font draws it no narrower than a
-full cell, so `Block` leaves these spaces out inside a raised or lowered script: `x^(a+b)` renders
-`xᵃ⁺ᵇ` there and `xᵃ ⁺ ᵇ` in a one-line layout.  The spaces a script gets for any other reason are written there
-either way.
+like `+`, `=`, `xx` or `in`; with it off they are written against their operands.  It says nothing
+about the spaces that keep words and function names legible, as in `sin x` or `a and b`, which are
+written either way, and a sign on the part after it is still written against that part.
+Whitespace typed with `keep_spaces` on wins where it was typed, and where none was typed this
+decides.  Such a space steps one width narrower when it lands in a script, and a fixed-width font
+draws it no narrower than a full cell, so `Block` leaves these spaces out inside a raised or lowered
+script rather than show it as padded as full-size math.  The spaces a script gets for any other
+reason are written there either way:
+
+```rust
+use asciimath_unicode::{Conf, Layout};
+let conf = Conf::default().with_spaced_operators(true);
+assert_eq!(conf.parse("a+b=c").to_string(), "a + b = c");
+assert_eq!(conf.parse("1 - - x").to_string(), "1 - -x");
+assert_eq!(conf.with_spaced_operators(false).parse("sinx+1").to_string(), "sin x+1");
+assert_eq!(conf.parse("x^(a+b)").to_string(), "xᵃ\u{2009}⁺\u{2009}ᵇ");
+let block = conf.with_layout(Layout::Block);
+assert_eq!(block.parse("x^(a+b)").to_string(), "xᵃ⁺ᵇ");
+assert_eq!(block.parse("x^sin x").to_string(), "xˢⁱⁿ\u{2009}ˣ");
+
+let kept = conf.with_keep_spaces(true);
+assert_eq!(kept.parse("a  +b").to_string(), "a  + b");
+```
 
 [`parse_unicode`]: https://docs.rs/asciimath-unicode/latest/asciimath_unicode/fn.parse_unicode.html
 [`Asciimath`]: https://docs.rs/asciimath-unicode/latest/asciimath_unicode/struct.Asciimath.html

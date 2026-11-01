@@ -5,22 +5,29 @@ use asciimath_parser::prefix_map::HashPrefixMap;
 use asciimath_parser::tree::Expression;
 use asciimath_parser::{SymbolClass, Token, Tokenizer};
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 macro_rules! tokens {
-    ($($token:expr => $($str:expr),+;)+) => {
+    ($($token:expr => $($name:literal $(=> $unicode:literal)?),+;)+) => {
         [
             $(
                 $(
-                    ($str, $token),
+                    ($name, $token, tokens!(@unicode $name $(, $unicode)?)),
                 )+
             )+
         ]
     };
+    (@unicode $name:literal) => {
+        $name
+    };
+    (@unicode $name:literal, $unicode:literal) => {
+        $unicode
+    };
 }
 
-const UNICODE_TOKENS: [(&str, Token); 430] = {
+/// Every token by name, with its unicode form
+static UNICODE_TOKENS: [(&str, Token, &str); 430] = {
     use SymbolClass::{Glyph, Joining, JoiningName, Leading, LeadingName, Name, Space};
     use Token::{
         Binary, CloseBracket, Frac, Function, OpenBracket, OpenCloseBracket, Sep, Sign, Sub, Super,
@@ -32,96 +39,189 @@ const UNICODE_TOKENS: [(&str, Token); 430] = {
         Super => "^";
         Sub => "_";
         Sep => ",";
-        Sign => "+", "-", "+-", "pm", "-+", "mp";
+        Sign => "+", "-", "+-" => "±", "pm" => "±", "-+" => "∓", "mp" => "∓";
         Function => "sin", "cos", "tan", "sinh", "cosh", "tanh", "cot", "sec", "csc", "arcsin",
             "arccos", "arctan", "coth", "sech", "csch", "exp", "log", "ln", "det", "gcd", "lcm",
-            "Sin", "Cos", "Tan", "Arcsin", "Arccos", "Arctan", "Sinh", "Cosh", "Tanh", "Cot",
-            "Sec", "Csc", "Log", "Ln", "f", "g", "arcsec", "arccsc", "arccot";
+            "Sin", "Cos", "Tan", "Arcsin", "Arccos", "Arctan", "Sinh", "Cosh", "Tanh", "Cot", "Sec",
+            "Csc", "Log", "Ln", "f", "g", "arcsec", "arccsc", "arccot";
         Unary => "sqrt", "abs", "norm", "floor", "ceil", "Abs", "hat", "bar", "overline", "vec",
             "dot", "ddot", "overarc", "overparen", "ul", "underline", "ubrace", "underbrace",
             "obrace", "overbrace", "text", "mbox", "cancel", "tilde";
-        // font commands
         Unary => "bb", "mathbf", "sf", "mathsf", "bbb", "mathbb", "cc", "mathcal", "tt", "mathtt",
             "fr", "mathfrak", "it", "mathit", "italic", "bold", "bbit", "bbsf", "sfit", "bbsfit",
             "bbcc", "bbfr";
         Binary => "frac", "root", "stackrel", "overset", "underset", "color", "id", "class";
-        // greek symbols
-        Symbol(Glyph) => "alpha", "Alpha", "beta", "Beta", "chi", "Chi", "delta", "Delta", "epsi",
-            "Epsi", "epsilon", "Epsilon", "varepsilon", "eta", "Eta", "gamma", "Gamma", "iota",
-            "Iota", "kappa", "Kappa","varkappa", "lambda", "Lambda", "lamda", "Lamda", "mu", "Mu",
-            "nu", "Nu", "omega", "Omega", "phi", "varphi", "Phi", "pi", "Pi", "varpi", "psi",
-            "Psi", "rho", "Rho", "varrho", "sigma", "Sigma", "tau", "Tau", "theta", "vartheta",
-            "Theta","Vartheta", "upsilon", "Upsilon", "xi", "Xi", "zeta", "Zeta";
-        // operations
-        Symbol(Joining) => "*", "cdot", "**", "ast", "***", "star", "//", "\\\\", "backslash",
-            "setminus", "xx", "times", "|><", "ltimes", "><|", "rtimes", "|><|", "bowtie", "-:",
-            "div", "divide", "@", "circ", "o+", "oplus", "ox", "otimes", "o.", "odot", "^^",
-            "wedge", "land", "vv", "vee", "lor", "nn", "cap", "uu", "cup", "ominus", "o-",
-            "oslash", "dag", "dagger", "ddag", "ddagger";
+        Symbol(Glyph) => "alpha" => "α", "Alpha" => "Α", "beta" => "β", "Beta" => "Β", "chi" => "χ",
+            "Chi" => "Χ", "delta" => "δ", "Delta" => "Δ", "epsi" => "ε", "Epsi" => "Ε",
+            "epsilon" => "ε", "Epsilon" => "Ε", "varepsilon" => "ϵ", "eta" => "η", "Eta" => "Η",
+            "gamma" => "γ", "Gamma" => "Γ", "iota" => "ι", "Iota" => "Ι", "kappa" => "κ",
+            "Kappa" => "Κ", "varkappa" => "ϰ", "lambda" => "λ", "Lambda" => "Λ", "lamda" => "λ",
+            "Lamda" => "Λ", "mu" => "μ", "Mu" => "Μ", "nu" => "ν", "Nu" => "Ν", "omega" => "ω",
+            "Omega" => "Ω", "phi" => "φ", "varphi" => "ϕ", "Phi" => "Φ", "pi" => "π", "Pi" => "Π",
+            "varpi" => "ϖ", "psi" => "ψ", "Psi" => "Ψ", "rho" => "ρ", "Rho" => "Ρ", "varrho" => "ϱ",
+            "sigma" => "σ", "Sigma" => "Σ", "tau" => "τ", "Tau" => "Τ", "theta" => "θ",
+            "vartheta" => "ϑ", "Theta" => "Θ", "Vartheta" => "ϴ", "upsilon" => "υ",
+            "Upsilon" => "Υ", "xi" => "ξ", "Xi" => "Ξ", "zeta" => "ζ", "Zeta" => "Ζ";
+        Symbol(Joining) => "*" => "⋅", "cdot" => "⋅", "**" => "∗", "ast" => "∗", "***" => "⋆",
+            "star" => "⋆", "//" => "/", "\\\\" => "\\", "backslash" => "\\", "setminus" => "\\",
+            "xx" => "×", "times" => "×", "|><" => "⋉", "ltimes" => "⋉", "><|" => "⋊",
+            "rtimes" => "⋊", "|><|" => "⋈", "bowtie" => "⋈", "-:" => "÷", "div" => "÷",
+            "divide" => "÷", "@" => "∘", "circ" => "∘", "o+" => "⊕", "oplus" => "⊕", "ox" => "⊗",
+            "otimes" => "⊗", "o." => "⊙", "odot" => "⊙", "^^" => "∧", "wedge" => "∧", "land" => "∧",
+            "vv" => "∨", "vee" => "∨", "lor" => "∨", "nn" => "∩", "cap" => "∩", "uu" => "∪",
+            "cup" => "∪", "ominus" => "⊖", "o-" => "⊖", "oslash" => "⊘", "dag" => "†",
+            "dagger" => "†", "ddag" => "‡", "ddagger" => "‡";
         // big operations, which want the operand after them
-        Symbol(Leading) => "sum", "prod", "^^^", "bigwedge", "vvv", "bigvee", "nnn", "bigcap",
-            "uuu", "bigcup";
-        // relations
-        Symbol(Joining) => "=", "!=", "ne", ":=", "<", "lt", "<=", "le", "lt=", "leq", ">", "gt",
-            "mlt", "ll", ">=", "ge", "gt=", "geq", "mgt", "gg", "-<", "prec", "-lt", ">-", "succ",
-            "-<=", "preceq", ">-=", "succeq", "in", "!in", "notin", "sub", "subset", "sup",
-            "supset", "sube", "subseteq", "supe", "supseteq",
-            "!sub", "nsub", "notsubset", "!sup", "nsup", "notsupset", "!sube", "nsubseteq",
-            "notsubseteq", "!supe", "nsupseteq", "notsupseteq",
-            "-=", "equiv", "!-=", "notequiv", "~=", "cong", "~~", "approx", "~", "sim",
-            "prop", "propto";
-        // logical
-        Symbol(Joining) => "=>", "implies", "<=>", "iff", "|--", "vdash", "|==", "models";
+        Symbol(Leading) => "sum" => "∑", "prod" => "∏", "^^^" => "⋀", "bigwedge" => "⋀",
+            "vvv" => "⋁", "bigvee" => "⋁", "nnn" => "⋂", "bigcap" => "⋂", "uuu" => "⋃",
+            "bigcup" => "⋃";
+        Symbol(Joining) => "=", "!=" => "≠", "ne" => "≠", ":=", "<", "lt" => "<", "<=" => "≤",
+            "le" => "≤", "lt=" => "≤", "leq" => "≤", ">", "gt" => ">", "mlt" => "≪", "ll" => "≪",
+            ">=" => "≥", "ge" => "≥", "gt=" => "≥", "geq" => "≥", "mgt" => "≫", "gg" => "≫",
+            "-<" => "≺", "prec" => "≺", "-lt" => "≺", ">-" => "≻", "succ" => "≻", "-<=" => "⪯",
+            "preceq" => "⪯", ">-=" => "⪰", "succeq" => "⪰", "in" => "∈", "!in" => "∉",
+            "notin" => "∉", "sub" => "⊂", "subset" => "⊂", "sup" => "⊃", "supset" => "⊃",
+            "sube" => "⊆", "subseteq" => "⊆", "supe" => "⊇", "supseteq" => "⊇", "!sub" => "⊄",
+            "nsub" => "⊄", "notsubset" => "⊄", "!sup" => "⊅", "nsup" => "⊅", "notsupset" => "⊅",
+            "!sube" => "⊈", "nsubseteq" => "⊈", "notsubseteq" => "⊈", "!supe" => "⊉",
+            "nsupseteq" => "⊉", "notsupseteq" => "⊉", "-=" => "≡", "equiv" => "≡", "!-=" => "≢",
+            "notequiv" => "≢", "~=" => "≅", "cong" => "≅", "~~" => "≈", "approx" => "≈", "~" => "∼",
+            "sim" => "∼", "prop" => "∝", "propto" => "∝";
+        Symbol(Joining) => "=>" => "⇒", "implies" => "⇒", "<=>" => "⇔", "iff" => "⇔",
+            "|--" => "⊢", "vdash" => "⊢", "|==" => "⊨", "models" => "⊨";
         // negation and the quantifiers, which want the operand after them
-        Symbol(Leading) => "not", "neg", "AA", "forall", "EE", "exists", "!EE", "notexists";
-        Symbol(Glyph) => "_|_", "bot", "TT", "top";
+        Symbol(Leading) => "not" => "¬", "neg" => "¬", "AA" => "∀", "forall" => "∀", "EE" => "∃",
+            "exists" => "∃", "!EE" => "∄", "notexists" => "∄";
+        Symbol(Glyph) => "_|_" => "⊥", "bot" => "⊥", "TT" => "⊤", "top" => "⊤";
         Symbol(JoiningName) => "and", "or", "if";
-        // misc
-        Symbol(Joining) => ":|:", ":.", "therefore", ":'", "because", "diamond", "frown";
-        Symbol(Leading) => "int", "oint", "iint", "iiint", "oiint", "oiiint";
-        Symbol(Space) => "\\ ", "quad", "qquad", "enspace", "thinspace";
+        Symbol(Joining) => ":|:" => "|", ":." => "∴", "therefore" => "∴", ":'" => "∵",
+            "because" => "∵", "diamond" => "⋄", "frown" => "⌢";
+        Symbol(Leading) => "int" => "∫", "oint" => "∮", "iint" => "∬", "iiint" => "∭",
+            "oiint" => "∯", "oiiint" => "∰";
+        Symbol(Space) => "\\ " => " ", "quad" => "\u{2003}", "qquad" => "\u{2003}\u{2003}",
+            "enspace" => "\u{2002}", "thinspace" => "\u{2009}";
         // not asciimath symbols, but each completes the operand before it, so a sign after joins
         Symbol(Glyph) => "!", "%";
-        Symbol(Glyph) => "del", "partial", "grad", "nabla",
-            "O/", "emptyset", "oo", "infty", "aleph", "...", "ldots",
-            "/_", "angle", "/_\\", "triangle", "'", "prime",
-            "cdots", "vdots", "ddots", "square", "CC", "NN", "QQ", "RR", "ZZ", "ell", "hbar";
-        // arrows
-        Symbol(Joining) => "uarr", "uparrow", "uArr", "Uparrow", "darr", "downarrow", "dArr",
-            "Downarrow", "rarr", "rightarrow", "->", "to", ">->",
-            "rightarrowtail", "->>", "twoheadrightarrow", ">->>", "twoheadrightarrowtail", "|->",
-            "mapsto", "larr", "leftarrow", "<-", "harr", "leftrightarrow", "<->", "rArr",
-            "Rightarrow", "==>", "lArr", "Leftarrow","<==",  "hArr", "Leftrightarrow", "<==>",
-            "rightleftharpoons";
-        // brackets
-        OpenBracket => "(", "[", "{", "|:", "(:", "<<", "langle", "left(", "left[", "{:", "|__",
-            "lfloor", "|~", "lceiling";
-        // right solution
-        CloseBracket => ")", "]", "}", ":|", ":)", ">>", "rangle", "right)", "right]", ":}",
-            "__|", "rfloor", "~|", "rceiling";
+        Symbol(Glyph) => "del" => "∂", "partial" => "∂", "grad" => "∇", "nabla" => "∇", "O/" => "∅",
+            "emptyset" => "∅", "oo" => "∞", "infty" => "∞", "aleph" => "ℵ", "..." => "…",
+            "ldots" => "…", "/_" => "∠", "angle" => "∠", "/_\\" => "△", "triangle" => "△",
+            "'" => "′", "prime" => "′", "cdots" => "⋯", "vdots" => "⋮", "ddots" => "⋱",
+            "square" => "□", "CC" => "ℂ", "NN" => "ℕ", "QQ" => "ℚ", "RR" => "ℝ", "ZZ" => "ℤ",
+            "ell" => "ℓ", "hbar" => "ℏ";
+        Symbol(Joining) => "uarr" => "↑", "uparrow" => "↑", "uArr" => "⇑", "Uparrow" => "⇑",
+            "darr" => "↓", "downarrow" => "↓", "dArr" => "⇓", "Downarrow" => "⇓", "rarr" => "→",
+            "rightarrow" => "→", "->" => "→", "to" => "→", ">->" => "↣", "rightarrowtail" => "↣",
+            "->>" => "↠", "twoheadrightarrow" => "↠", ">->>" => "⤖", "twoheadrightarrowtail" => "⤖",
+            "|->" => "↦", "mapsto" => "↦", "larr" => "←", "leftarrow" => "←", "<-" => "←",
+            "harr" => "↔", "leftrightarrow" => "↔", "<->" => "↔", "rArr" => "⇒",
+            "Rightarrow" => "⇒", "==>" => "⇒", "lArr" => "⇐", "Leftarrow" => "⇐", "<==" => "⇐",
+            "hArr" => "⇔", "Leftrightarrow" => "⇔", "<==>" => "⇔", "rightleftharpoons" => "⇌";
+        OpenBracket => "(", "[", "{", "|:" => "|", "(:" => "⟨", "<<" => "⟨", "langle" => "⟨",
+            "left(" => "(", "left[" => "[", "{:" => "", "|__" => "⌊", "lfloor" => "⌊", "|~" => "⌈",
+            "lceiling" => "⌈";
+        CloseBracket => ")", "]", "}", ":|" => "|", ":)" => "⟩", ">>" => "⟩", "rangle" => "⟩",
+            "right)" => ")", "right]" => "]", ":}" => "", "__|" => "⌋", "rfloor" => "⌋",
+            "~|" => "⌉", "rceiling" => "⌉";
         OpenCloseBracket => "|", "||";
-        // defined names
         Symbol(Name) => "dx", "dy", "dz", "dt";
-        // underover
         Symbol(LeadingName) => "lim", "Lim", "dim", "lub", "glb", "min", "max";
         Symbol(JoiningName) => "mod";
     )
 };
 
-pub static TOKEN_MAP: LazyLock<HashPrefixMap<Cow<'static, str>, Token>> = LazyLock::new(|| {
+/// Every token the tokenizer knows by name, emoji shortcodes included
+pub(crate) static TOKEN_MAP: LazyLock<HashPrefixMap<Cow<'static, str>, Token>> =
+    LazyLock::new(|| {
+        UNICODE_TOKENS
+            .iter()
+            .map(|&(name, tok, _)| (Cow::Borrowed(name), tok))
+            .chain(emojis::iter().flat_map(|emoji| {
+                emoji.shortcodes().map(|code| {
+                    (
+                        Cow::Owned(format!(":{code}:")),
+                        Token::Symbol(SymbolClass::Glyph),
+                    )
+                })
+            }))
+            .collect()
+    });
+
+/// Each token's unicode form, by its name
+static UNICODE_STRS: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
     UNICODE_TOKENS
-        .into_iter()
-        .map(|(name, tok)| (Cow::Borrowed(name), tok))
-        .chain(emojis::iter().flat_map(|emoji| {
-            emoji.shortcodes().map(|code| {
-                (
-                    Cow::Owned(format!(":{code}:")),
-                    Token::Symbol(SymbolClass::Glyph),
-                )
-            })
-        }))
+        .iter()
+        .map(|&(name, _, unicode)| (name, unicode))
         .collect()
 });
+
+/// The unicode form of a symbol, or of an emoji shortcode in the given skin tone
+pub(crate) fn symbol_str(inp: &str, skin_tone: SkinTone) -> &str {
+    if let Some(unicode) = UNICODE_STRS.get(inp) {
+        unicode
+    } else {
+        inp.strip_prefix(':')
+            .and_then(|code| code.strip_suffix(':'))
+            .and_then(emojis::get_by_shortcode)
+            .map_or(inp, |emoji| {
+                emoji
+                    .with_skin_tone(skin_tone.into())
+                    .or_else(|| emoji.with_skin_tone(first_tone(skin_tone).into()))
+                    .unwrap_or(emoji)
+                    .as_str()
+            })
+    }
+}
+
+/// The tone of the first person of a two-person tone, for an emoji of one person
+fn first_tone(skin_tone: SkinTone) -> SkinTone {
+    match skin_tone {
+        SkinTone::LightAndMediumLight
+        | SkinTone::LightAndMedium
+        | SkinTone::LightAndMediumDark
+        | SkinTone::LightAndDark => SkinTone::Light,
+        SkinTone::MediumLightAndLight
+        | SkinTone::MediumLightAndMedium
+        | SkinTone::MediumLightAndMediumDark
+        | SkinTone::MediumLightAndDark => SkinTone::MediumLight,
+        SkinTone::MediumAndLight
+        | SkinTone::MediumAndMediumLight
+        | SkinTone::MediumAndMediumDark
+        | SkinTone::MediumAndDark => SkinTone::Medium,
+        SkinTone::MediumDarkAndLight
+        | SkinTone::MediumDarkAndMediumLight
+        | SkinTone::MediumDarkAndMedium
+        | SkinTone::MediumDarkAndDark => SkinTone::MediumDark,
+        SkinTone::DarkAndLight
+        | SkinTone::DarkAndMediumLight
+        | SkinTone::DarkAndMedium
+        | SkinTone::DarkAndMediumDark => SkinTone::Dark,
+        single => single,
+    }
+}
+
+/// The unicode form of a bracket, empty for an invisible one
+pub(crate) fn bracket_str(inp: &str) -> &str {
+    UNICODE_STRS.get(inp).copied().unwrap_or(inp)
+}
+
+/// The chars of every bracket's unicode form
+static BRACKET_CHARS: LazyLock<HashSet<char>> = LazyLock::new(|| {
+    UNICODE_TOKENS
+        .iter()
+        .filter(|(_, token, _)| {
+            matches!(
+                token,
+                Token::OpenBracket | Token::CloseBracket | Token::OpenCloseBracket
+            )
+        })
+        .flat_map(|(_, _, unicode)| unicode.chars())
+        .collect()
+});
+
+/// Whether `chr` is part of a bracket
+pub(crate) fn is_bracket_char(chr: char) -> bool {
+    BRACKET_CHARS.contains(&chr)
+}
 
 /// A space one step narrower, for whitespace that lands in a raised or lowered part
 ///
@@ -138,7 +238,8 @@ fn narrower_space(space: char) -> char {
     }
 }
 
-pub fn superscript_char(inp: char) -> Option<char> {
+/// The raised form of `inp`, if it has one
+pub(crate) fn superscript_char(inp: char) -> Option<char> {
     match inp {
         'a' => Some('ᵃ'),
         'b' => Some('ᵇ'),
@@ -210,13 +311,14 @@ pub fn superscript_char(inp: char) -> Option<char> {
         'φ' => Some('ᵠ'),
         'χ' => Some('ᵡ'),
         // already raised, or without a raised form but needed for legibility
-        c @ ('′' | ',') => Some(c),
+        chr @ ('′' | ',') => Some(chr),
         space if space.is_whitespace() => Some(narrower_space(space)),
         _ => None,
     }
 }
 
-pub fn subscript_char(inp: char) -> Option<char> {
+/// The lowered form of `inp`, if it has one
+pub(crate) fn subscript_char(inp: char) -> Option<char> {
     match inp {
         'a' => Some('ₐ'),
         'e' => Some('ₑ'),
@@ -262,297 +364,20 @@ pub fn subscript_char(inp: char) -> Option<char> {
     }
 }
 
-#[allow(clippy::too_many_lines)]
-pub fn symbol_str(inp: &str, skin_tone: SkinTone) -> &str {
-    match inp {
-        "/" | "//" => "/",
-        "^" => "^",
-        "_" => "_",
-        "," => ",",
-        // greek
-        "alpha" => "α",
-        "Alpha" => "Α",
-        "beta" => "β",
-        "Beta" => "Β",
-        "chi" => "χ",
-        "Chi" => "Χ",
-        "delta" => "δ",
-        "Delta" => "Δ",
-        "epsi" | "epsilon" => "ε",
-        "Epsi" | "Epsilon" => "Ε",
-        "varepsilon" => "ϵ",
-        "eta" => "η",
-        "Eta" => "Η",
-        "gamma" => "γ",
-        "Gamma" => "Γ",
-        "iota" => "ι",
-        "Iota" => "Ι",
-        "kappa" => "κ",
-        "Kappa" => "Κ",
-        "varkappa" => "ϰ",
-        "lambda" | "lamda" => "λ",
-        "Lambda" | "Lamda" => "Λ",
-        "mu" => "μ",
-        "Mu" => "Μ",
-        "nu" => "ν",
-        "Nu" => "Ν",
-        "omega" => "ω",
-        "Omega" => "Ω",
-        "phi" => "φ",
-        "varphi" => "ϕ",
-        "Phi" => "Φ",
-        "pi" => "π",
-        "Pi" => "Π",
-        "varpi" => "ϖ",
-        "psi" => "ψ",
-        "Psi" => "Ψ",
-        "rho" => "ρ",
-        "Rho" => "Ρ",
-        "varrho" => "ϱ",
-        "sigma" => "σ",
-        "Sigma" => "Σ",
-        "tau" => "τ",
-        "Tau" => "Τ",
-        "theta" => "θ",
-        "vartheta" => "ϑ",
-        "Theta" => "Θ",
-        "Vartheta" => "ϴ",
-        "upsilon" => "υ",
-        "Upsilon" => "Υ",
-        "xi" => "ξ",
-        "Xi" => "Ξ",
-        "zeta" => "ζ",
-        "Zeta" => "Ζ",
-        // operations
-        "*" | "cdot" => "⋅",
-        "**" | "ast" => "∗",
-        "***" | "star" => "⋆",
-        "\\\\" | "backslash" | "setminus" => "\\",
-        "xx" | "times" => "×",
-        "|><" | "ltimes" => "⋉",
-        "><|" | "rtimes" => "⋊",
-        "|><|" | "bowtie" => "⋈",
-        "-:" | "div" | "divide" => "÷",
-        "@" | "circ" => "∘",
-        "o+" | "oplus" => "⊕",
-        "ox" | "otimes" => "⊗",
-        "o." | "odot" => "⊙",
-        "sum" => "∑",
-        "prod" => "∏",
-        "^^" | "wedge" | "land" => "∧",
-        "^^^" | "bigwedge" => "⋀",
-        "vv" | "vee" | "lor" => "∨",
-        "vvv" | "bigvee" => "⋁",
-        "nn" | "cap" => "∩",
-        "nnn" | "bigcap" => "⋂",
-        "uu" | "cup" => "∪",
-        "uuu" | "bigcup" => "⋃",
-        "ominus" | "o-" => "⊖",
-        "oslash" => "⊘",
-        "dag" | "dagger" => "†",
-        "ddag" | "ddagger" => "‡",
-        // relations
-        "=" => "=",
-        "!=" | "ne" => "≠",
-        "lt" | "<" => "<",
-        "<=" | "le" | "lt=" | "leq" => "≤",
-        "gt" | ">" => ">",
-        "mlt" | "ll" => "≪",
-        ">=" | "ge" | "gt=" | "geq" => "≥",
-        "mgt" | "gg" => "≫",
-        "-<" | "prec" | "-lt" => "≺",
-        ">-" | "succ" => "≻",
-        "-<=" | "preceq" => "⪯",
-        ">-=" | "succeq" => "⪰",
-        "in" => "∈",
-        "!in" | "notin" => "∉",
-        "sub" | "subset" => "⊂",
-        "sup" | "supset" => "⊃",
-        "sube" | "subseteq" => "⊆",
-        "supe" | "supseteq" => "⊇",
-        "!sub" | "nsub" | "notsubset" => "⊄",
-        "!sup" | "nsup" | "notsupset" => "⊅",
-        "!sube" | "nsubseteq" | "notsubseteq" => "⊈",
-        "!supe" | "nsupseteq" | "notsupseteq" => "⊉",
-        "-=" | "equiv" => "≡",
-        "!-=" | "notequiv" => "≢",
-        "~=" | "cong" => "≅",
-        "~~" | "approx" => "≈",
-        "~" | "sim" => "∼",
-        "prop" | "propto" => "∝",
-        // logical
-        "not" | "neg" => "¬",
-        "=>" | "implies" | "rArr" | "Rightarrow" | "==>" => "⇒",
-        "<=>" | "iff" | "hArr" | "Leftrightarrow" | "<==>" => "⇔",
-        "AA" | "forall" => "∀",
-        "EE" | "exists" => "∃",
-        "!EE" | "notexists" => "∄",
-        "_|_" | "bot" => "⊥",
-        "TT" | "top" => "⊤",
-        "|--" | "vdash" => "⊢",
-        "|==" | "models" => "⊨",
-        "and" => "and",
-        "or" => "or",
-        "if" => "if",
-        // misc
-        ":|:" | "|" => "|",
-        "int" => "∫",
-        "oint" => "∮",
-        "iint" => "∬",
-        "iiint" => "∭",
-        "oiint" => "∯",
-        "oiiint" => "∰",
-        "del" | "partial" => "∂",
-        "grad" | "nabla" => "∇",
-        "+-" | "pm" => "±",
-        "-+" | "mp" => "∓",
-        "O/" | "emptyset" => "∅",
-        "oo" | "infty" => "∞",
-        "aleph" => "ℵ",
-        "..." | "ldots" => "…",
-        ":." | "therefore" => "∴",
-        ":'" | "because" => "∵",
-        "/_" | "angle" => "∠",
-        "/_\\" | "triangle" => "△",
-        "'" | "prime" => "′",
-        "\\ " => " ",
-        "quad" => "\u{2003}",
-        "qquad" => "\u{2003}\u{2003}",
-        "frown" => "⌢",
-        "cdots" => "⋯",
-        "vdots" => "⋮",
-        "ddots" => "⋱",
-        "diamond" => "⋄",
-        "square" => "□",
-        "CC" => "ℂ",
-        "NN" => "ℕ",
-        "QQ" => "ℚ",
-        "RR" => "ℝ",
-        "ZZ" => "ℤ",
-        "ell" => "ℓ",
-        "hbar" => "ℏ",
-        "enspace" => "\u{2002}",
-        "thinspace" => "\u{2009}",
-        // arrows
-        "uarr" | "uparrow" => "↑",
-        "uArr" | "Uparrow" => "⇑",
-        "darr" | "downarrow" => "↓",
-        "dArr" | "Downarrow" => "⇓",
-        "rarr" | "rightarrow" | "->" | "to" => "→",
-        ">->" | "rightarrowtail" => "↣",
-        "->>" | "twoheadrightarrow" => "↠",
-        ">->>" | "twoheadrightarrowtail" => "⤖",
-        "|->" | "mapsto" => "↦",
-        "larr" | "leftarrow" | "<-" => "←",
-        "harr" | "leftrightarrow" | "<->" => "↔",
-        "lArr" | "Leftarrow" | "<==" => "⇐",
-        "rightleftharpoons" => "⇌",
-        // emoji
-        other => other
-            .strip_prefix(':')
-            .and_then(|code| code.strip_suffix(':'))
-            .and_then(emojis::get_by_shortcode)
-            .map_or(other, |emoji| {
-                emoji
-                    .with_skin_tone(skin_tone.into())
-                    .or_else(|| emoji.with_skin_tone(first_tone(skin_tone).into()))
-                    .unwrap_or(emoji)
-                    .as_str()
-            }),
-    }
-}
-
-/// The tone of the first person of a two-person tone, for an emoji of one person
-fn first_tone(skin_tone: SkinTone) -> SkinTone {
-    match skin_tone {
-        SkinTone::LightAndMediumLight
-        | SkinTone::LightAndMedium
-        | SkinTone::LightAndMediumDark
-        | SkinTone::LightAndDark => SkinTone::Light,
-        SkinTone::MediumLightAndLight
-        | SkinTone::MediumLightAndMedium
-        | SkinTone::MediumLightAndMediumDark
-        | SkinTone::MediumLightAndDark => SkinTone::MediumLight,
-        SkinTone::MediumAndLight
-        | SkinTone::MediumAndMediumLight
-        | SkinTone::MediumAndMediumDark
-        | SkinTone::MediumAndDark => SkinTone::Medium,
-        SkinTone::MediumDarkAndLight
-        | SkinTone::MediumDarkAndMediumLight
-        | SkinTone::MediumDarkAndMedium
-        | SkinTone::MediumDarkAndDark => SkinTone::MediumDark,
-        SkinTone::DarkAndLight
-        | SkinTone::DarkAndMediumLight
-        | SkinTone::DarkAndMedium
-        | SkinTone::DarkAndMediumDark => SkinTone::Dark,
-        single => single,
-    }
-}
-
-pub fn left_bracket_str(inp: &str) -> &str {
-    match inp {
-        "(" | "left(" => "(",
-        "[" | "left[" => "[",
-        "{" => "{",
-        "{:" | "" => "",
-        "(:" | "langle" | "<<" => "⟨",
-        "|__" | "lfloor" => "⌊",
-        "|~" | "lceiling" => "⌈",
-        "|:" | "|" => "|",
-        "||" => "||",
-        _ => unreachable!("matches all valid left bracket strs"),
-    }
-}
-
-pub fn right_bracket_str(inp: &str) -> &str {
-    match inp {
-        ")" | "right)" => ")",
-        "]" | "right]" => "]",
-        "}" => "}",
-        ":}" | "" => "",
-        ":)" | "rangle" | ">>" => "⟩",
-        "__|" | "rfloor" => "⌋",
-        "~|" | "rceiling" => "⌉",
-        ":|" | "|" => "|",
-        "||" => "||",
-        _ => unreachable!("matches all valid right bracket strs"),
-    }
-}
-
-/// The chars of every bracket's form
-static BRACKET_CHARS: LazyLock<HashSet<char>> = LazyLock::new(|| {
-    asciimath_parser::ASCIIMATH_TOKENS
-        .into_iter()
-        .flat_map(|(spelling, token)| {
-            match token {
-                Token::OpenBracket | Token::OpenCloseBracket => left_bracket_str(spelling),
-                Token::CloseBracket => right_bracket_str(spelling),
-                _ => "",
-            }
-            .chars()
-        })
-        .collect()
-});
-
-/// Whether `chr` is part of a bracket
-pub fn is_bracket_char(chr: char) -> bool {
-    BRACKET_CHARS.contains(&chr)
-}
-
 #[inline]
 fn map_range(inp: char, from: char, to: char) -> char {
     char::from_u32((inp as u32) - (from as u32) + (to as u32)).unwrap()
 }
 
-pub fn bold_map(inp: char) -> char {
+/// `inp` in bold, keeping any other style it has
+pub(crate) fn bold_map(inp: char) -> char {
     match inp {
-        // regular
-        c @ 'A'..='Z' => map_range(c, 'A', '\u{1d400}'),
-        c @ 'a'..='z' => map_range(c, 'a', '\u{1d41a}'),
-        c @ '0'..='9' => map_range(c, '0', '\u{1d7ce}'),
-        c @ 'Α'..='Ω' => map_range(c, '\u{0391}', '\u{1d6a8}'),
+        chr @ 'A'..='Z' => map_range(chr, 'A', '\u{1d400}'),
+        chr @ 'a'..='z' => map_range(chr, 'a', '\u{1d41a}'),
+        chr @ '0'..='9' => map_range(chr, '0', '\u{1d7ce}'),
+        chr @ 'Α'..='Ω' => map_range(chr, '\u{0391}', '\u{1d6a8}'),
         'ϴ' => '\u{1d6b9}',
-        c @ 'α'..='ω' => map_range(c, '\u{03b1}', '\u{1d6c2}'),
+        chr @ 'α'..='ω' => map_range(chr, '\u{03b1}', '\u{1d6c2}'),
         '∂' => '𝛛',
         'ϵ' => '𝛜',
         'ϑ' => '𝛝',
@@ -561,11 +386,9 @@ pub fn bold_map(inp: char) -> char {
         'ϱ' => '𝛠',
         'ϖ' => '𝛡',
         '∇' => '𝛁',
-        // italic
         'ℎ' => '\u{1d489}',
-        c @ '\u{1d434}'..='\u{1d467}' => map_range(c, '\u{1d434}', '\u{1d468}'),
-        c @ '\u{1d6e2}'..='\u{1d71b}' => map_range(c, '\u{1d6e2}', '\u{1d71c}'),
-        // cal
+        chr @ '\u{1d434}'..='\u{1d467}' => map_range(chr, '\u{1d434}', '\u{1d468}'),
+        chr @ '\u{1d6e2}'..='\u{1d71b}' => map_range(chr, '\u{1d6e2}', '\u{1d71c}'),
         '\u{212c}' => '\u{1d4d1}',
         '\u{2130}' => '\u{1d4d4}',
         '\u{2131}' => '\u{1d4d5}',
@@ -577,34 +400,29 @@ pub fn bold_map(inp: char) -> char {
         '\u{212f}' => '\u{1d4ee}',
         '\u{210a}' => '\u{1d4f0}',
         '\u{2134}' => '\u{1d4f8}',
-        c @ '\u{1d49c}'..='\u{1d4cf}' => map_range(c, '\u{1d49c}', '\u{1d4d0}'),
-        // frak
+        chr @ '\u{1d49c}'..='\u{1d4cf}' => map_range(chr, '\u{1d49c}', '\u{1d4d0}'),
         '\u{212d}' => '\u{1d56e}',
         '\u{210c}' => '\u{1d573}',
         '\u{2111}' => '\u{1d574}',
         '\u{211c}' => '\u{1d57d}',
         '\u{2128}' => '\u{1d585}',
-        c @ '\u{1d504}'..='\u{1d537}' => map_range(c, '\u{1d504}', '\u{1d56c}'),
-        // sans
-        c @ '\u{1d5a0}'..='\u{1d5d3}' => map_range(c, '\u{1d5a0}', '\u{1d5d4}'),
-        c @ '\u{1d7e2}'..='\u{1d7eb}' => map_range(c, '\u{1d7e2}', '\u{1d7ec}'),
-        // italic sans
-        c @ '\u{1d608}'..='\u{1d63b}' => map_range(c, '\u{1d608}', '\u{1d63c}'),
-        // rest
-        c => c,
+        chr @ '\u{1d504}'..='\u{1d537}' => map_range(chr, '\u{1d504}', '\u{1d56c}'),
+        chr @ '\u{1d5a0}'..='\u{1d5d3}' => map_range(chr, '\u{1d5a0}', '\u{1d5d4}'),
+        chr @ '\u{1d7e2}'..='\u{1d7eb}' => map_range(chr, '\u{1d7e2}', '\u{1d7ec}'),
+        chr @ '\u{1d608}'..='\u{1d63b}' => map_range(chr, '\u{1d608}', '\u{1d63c}'),
+        chr => chr,
     }
 }
 
-pub fn italic_map(inp: char) -> char {
+/// `inp` in italic, keeping any other style it has
+pub(crate) fn italic_map(inp: char) -> char {
     match inp {
-        // letterlike
         'h' => 'ℎ',
-        // regular
-        c @ 'A'..='Z' => map_range(c, 'A', '\u{1d434}'),
-        c @ 'a'..='z' => map_range(c, 'a', '\u{1d44e}'),
-        c @ 'Α'..='Ω' => map_range(c, '\u{0391}', '\u{1d6e2}'),
+        chr @ 'A'..='Z' => map_range(chr, 'A', '\u{1d434}'),
+        chr @ 'a'..='z' => map_range(chr, 'a', '\u{1d44e}'),
+        chr @ 'Α'..='Ω' => map_range(chr, '\u{0391}', '\u{1d6e2}'),
         'ϴ' => '\u{1d6f3}',
-        c @ 'α'..='ω' => map_range(c, '\u{03b1}', '\u{1d6fc}'),
+        chr @ 'α'..='ω' => map_range(chr, '\u{03b1}', '\u{1d6fc}'),
         '∂' => '𝜕',
         'ϵ' => '𝜖',
         'ϑ' => '𝜗',
@@ -613,28 +431,23 @@ pub fn italic_map(inp: char) -> char {
         'ϱ' => '𝜚',
         'ϖ' => '𝜛',
         '∇' => '𝛻',
-        // bold
-        c @ '\u{1d400}'..='\u{1d433}' => map_range(c, '\u{1d400}', '\u{1d468}'),
-        c @ '\u{1d6a8}'..='\u{1d6e1}' => map_range(c, '\u{1d6a8}', '\u{1d71c}'),
-        // sans
-        c @ '\u{1d5a0}'..='\u{1d5d3}' => map_range(c, '\u{1d5a0}', '\u{1d608}'),
-        // bold sans
-        c @ '\u{1d5d4}'..='\u{1d607}' => map_range(c, '\u{1d5d4}', '\u{1d63c}'),
-        c @ '\u{1d756}'..='\u{1d78f}' => map_range(c, '\u{1d756}', '\u{1d790}'),
-        // extra
+        chr @ '\u{1d400}'..='\u{1d433}' => map_range(chr, '\u{1d400}', '\u{1d468}'),
+        chr @ '\u{1d6a8}'..='\u{1d6e1}' => map_range(chr, '\u{1d6a8}', '\u{1d71c}'),
+        chr @ '\u{1d5a0}'..='\u{1d5d3}' => map_range(chr, '\u{1d5a0}', '\u{1d608}'),
+        chr @ '\u{1d5d4}'..='\u{1d607}' => map_range(chr, '\u{1d5d4}', '\u{1d63c}'),
+        chr @ '\u{1d756}'..='\u{1d78f}' => map_range(chr, '\u{1d756}', '\u{1d790}'),
         '\u{1d53b}' => '\u{2145}',
         '\u{1d555}' => '\u{2146}',
         '\u{1d556}' => '\u{2147}',
         '\u{1d55a}' => '\u{2148}',
         '\u{1d55b}' => '\u{2149}',
-        // rest
-        c => c,
+        chr => chr,
     }
 }
 
-pub fn cal_map(inp: char) -> char {
+/// `inp` in calligraphic script, bold kept
+pub(crate) fn cal_map(inp: char) -> char {
     match inp {
-        // letterlike
         'B' => '\u{212c}',
         'E' => '\u{2130}',
         'F' => '\u{2131}',
@@ -646,37 +459,31 @@ pub fn cal_map(inp: char) -> char {
         'e' => '\u{212f}',
         'g' => '\u{210a}',
         'o' => '\u{2134}',
-        // regular
-        c @ 'A'..='Z' => map_range(c, 'A', '\u{1d49c}'),
-        c @ 'a'..='z' => map_range(c, 'a', '\u{1d4b6}'),
-        // bold
-        c @ '\u{1d400}'..='\u{1d433}' => map_range(c, '\u{1d400}', '\u{1d4d0}'),
-        // rest
-        c => c,
+        chr @ 'A'..='Z' => map_range(chr, 'A', '\u{1d49c}'),
+        chr @ 'a'..='z' => map_range(chr, 'a', '\u{1d4b6}'),
+        chr @ '\u{1d400}'..='\u{1d433}' => map_range(chr, '\u{1d400}', '\u{1d4d0}'),
+        chr => chr,
     }
 }
 
-pub fn frak_map(inp: char) -> char {
+/// `inp` in fraktur, bold kept
+pub(crate) fn frak_map(inp: char) -> char {
     match inp {
-        // letterlike
         'C' => '\u{212d}',
         'H' => '\u{210c}',
         'I' => '\u{2111}',
         'R' => '\u{211c}',
         'Z' => '\u{2128}',
-        // regular
-        c @ 'A'..='Z' => map_range(c, 'A', '\u{1d504}'),
-        c @ 'a'..='z' => map_range(c, 'a', '\u{1d51e}'),
-        // bold
-        c @ '\u{1d400}'..='\u{1d433}' => map_range(c, '\u{1d400}', '\u{1d56c}'),
-        // rest
-        c => c,
+        chr @ 'A'..='Z' => map_range(chr, 'A', '\u{1d504}'),
+        chr @ 'a'..='z' => map_range(chr, 'a', '\u{1d51e}'),
+        chr @ '\u{1d400}'..='\u{1d433}' => map_range(chr, '\u{1d400}', '\u{1d56c}'),
+        chr => chr,
     }
 }
 
-pub fn double_map(inp: char) -> char {
+/// `inp` double-struck
+pub(crate) fn double_map(inp: char) -> char {
     match inp {
-        // letterlike
         'C' => '\u{2102}',
         'H' => '\u{210d}',
         'N' => '\u{2115}',
@@ -684,11 +491,9 @@ pub fn double_map(inp: char) -> char {
         'Q' => '\u{211a}',
         'R' => '\u{211d}',
         'Z' => '\u{2124}',
-        // regular
-        c @ 'A'..='Z' => map_range(c, 'A', '\u{1d538}'),
-        c @ 'a'..='z' => map_range(c, 'a', '\u{1d552}'),
-        c @ '0'..='9' => map_range(c, '0', '\u{1d7d8}'),
-        // extras
+        chr @ 'A'..='Z' => map_range(chr, 'A', '\u{1d538}'),
+        chr @ 'a'..='z' => map_range(chr, 'a', '\u{1d552}'),
+        chr @ '0'..='9' => map_range(chr, '0', '\u{1d7d8}'),
         'π' => '\u{213c}',
         'γ' => '\u{213d}',
         'Γ' => '\u{213e}',
@@ -699,45 +504,39 @@ pub fn double_map(inp: char) -> char {
         '\u{1d452}' => '\u{2147}',
         '\u{1d456}' => '\u{2148}',
         '\u{1d457}' => '\u{2149}',
-        // rest
-        c => c,
+        chr => chr,
     }
 }
 
-pub fn sans_map(inp: char) -> char {
+/// `inp` in sans-serif, keeping any other style it has
+pub(crate) fn sans_map(inp: char) -> char {
     match inp {
-        // regular
-        c @ 'A'..='Z' => map_range(c, 'A', '\u{1d5a0}'),
-        c @ 'a'..='z' => map_range(c, 'a', '\u{1d5ba}'),
-        c @ '0'..='9' => map_range(c, '0', '\u{1d7e2}'),
-        // bold
-        c @ '\u{1d400}'..='\u{1d433}' => map_range(c, '\u{1d400}', '\u{1d5d4}'),
-        c @ '\u{1d7ce}'..='\u{1d7d7}' => map_range(c, '\u{1d7ce}', '\u{1d7ec}'),
-        c @ '\u{1d6a8}'..='\u{1d6e1}' => map_range(c, '\u{1d6a8}', '\u{1d756}'),
-        // italic
+        chr @ 'A'..='Z' => map_range(chr, 'A', '\u{1d5a0}'),
+        chr @ 'a'..='z' => map_range(chr, 'a', '\u{1d5ba}'),
+        chr @ '0'..='9' => map_range(chr, '0', '\u{1d7e2}'),
+        chr @ '\u{1d400}'..='\u{1d433}' => map_range(chr, '\u{1d400}', '\u{1d5d4}'),
+        chr @ '\u{1d7ce}'..='\u{1d7d7}' => map_range(chr, '\u{1d7ce}', '\u{1d7ec}'),
+        chr @ '\u{1d6a8}'..='\u{1d6e1}' => map_range(chr, '\u{1d6a8}', '\u{1d756}'),
         'ℎ' => '\u{1d629}',
-        c @ '\u{1d434}'..='\u{1d467}' => map_range(c, '\u{1d434}', '\u{1d608}'),
-        // bold italic
-        c @ '\u{1d468}'..='\u{1d49b}' => map_range(c, '\u{1d468}', '\u{1d63c}'),
-        c @ '\u{1d71c}'..='\u{1d755}' => map_range(c, '\u{1d71c}', '\u{1d790}'),
-        // rest
-        c => c,
+        chr @ '\u{1d434}'..='\u{1d467}' => map_range(chr, '\u{1d434}', '\u{1d608}'),
+        chr @ '\u{1d468}'..='\u{1d49b}' => map_range(chr, '\u{1d468}', '\u{1d63c}'),
+        chr @ '\u{1d71c}'..='\u{1d755}' => map_range(chr, '\u{1d71c}', '\u{1d790}'),
+        chr => chr,
     }
 }
 
-pub fn mono_map(inp: char) -> char {
+/// `inp` in monospace
+pub(crate) fn mono_map(inp: char) -> char {
     match inp {
-        // regular
-        c @ 'A'..='Z' => map_range(c, 'A', '\u{1d670}'),
-        c @ 'a'..='z' => map_range(c, 'a', '\u{1d68a}'),
-        c @ '0'..='9' => map_range(c, '0', '\u{1d7f6}'),
-        // rest
-        c => c,
+        chr @ 'A'..='Z' => map_range(chr, 'A', '\u{1d670}'),
+        chr @ 'a'..='z' => map_range(chr, 'a', '\u{1d68a}'),
+        chr @ '0'..='9' => map_range(chr, '0', '\u{1d7f6}'),
+        chr => chr,
     }
 }
 
 /// Parse `inp`, with the whitespace between items of an expression only if `keep_spaces`
-pub fn parse(inp: &str, keep_spaces: bool) -> Expression<'_> {
+pub(crate) fn parse(inp: &str, keep_spaces: bool) -> Expression<'_> {
     asciimath_parser::parse_tokens(
         Tokenizer::with_tokens(inp, &*TOKEN_MAP, true)
             .filter(|&(_, token)| keep_spaces || token != Token::Space),
@@ -756,38 +555,26 @@ mod tests {
             "/", "^", "_", ",", "+", "-", "=", ":=", "<", ">", "!", "%", "(", "[", "{", ")", "]",
             "}", "|", "||",
         ];
-        for (string, tok) in UNICODE_TOKENS {
-            let mapped = match tok {
-                Token::OpenBracket => super::left_bracket_str(string),
-                Token::CloseBracket => super::right_bracket_str(string),
-                Token::OpenCloseBracket => {
-                    assert_eq!(
-                        super::left_bracket_str(string),
-                        super::right_bracket_str(string),
-                        "{string:?} differs by side"
-                    );
-                    super::symbol_str(string, SkinTone::Default)
-                }
-                Token::Symbol(class) if class.is_name() => {
-                    assert_eq!(
-                        super::symbol_str(string, SkinTone::Default),
-                        string,
-                        "{string:?} is written as letters but renders as something else"
-                    );
-                    continue;
-                }
-                Token::Symbol(_)
+        for &(string, tok, unicode) in &UNICODE_TOKENS {
+            match tok {
+                Token::Symbol(class) if class.is_name() => assert_eq!(
+                    unicode, string,
+                    "{string:?} is written as letters but renders as something else"
+                ),
+                Token::OpenBracket
+                | Token::CloseBracket
+                | Token::OpenCloseBracket
+                | Token::Symbol(_)
                 | Token::Sign
                 | Token::Frac
                 | Token::Super
                 | Token::Sub
-                | Token::Sep => super::symbol_str(string, SkinTone::Default),
-                _ => continue,
-            };
-            assert!(
-                mapped != string || WRITTEN_AS_TYPED.contains(&string),
-                "{string:?} has no unicode form"
-            );
+                | Token::Sep => assert!(
+                    unicode != string || WRITTEN_AS_TYPED.contains(&string),
+                    "{string:?} has no unicode form"
+                ),
+                _ => {}
+            }
         }
     }
 
@@ -797,7 +584,7 @@ mod tests {
         const DELIBERATE: [(&str, &str); 0] = [];
 
         let parsed: HashMap<&str, Token> = asciimath_parser::ASCIIMATH_TOKENS.into_iter().collect();
-        for (string, tok) in UNICODE_TOKENS {
+        for &(string, tok, _) in &UNICODE_TOKENS {
             // a symbol only this crate knows has nothing to agree with
             if let Some(&other) = parsed.get(string)
                 && !DELIBERATE.iter().any(|&(name, _)| name == string)
@@ -870,19 +657,19 @@ mod tests {
 
     #[test]
     fn superscript_mappings() {
-        for c in 'a'..='z' {
-            if c != 'q' {
+        for chr in 'a'..='z' {
+            if chr != 'q' {
                 assert!(
-                    super::superscript_char(c).is_some(),
-                    "missing superscript for '{c}'"
+                    super::superscript_char(chr).is_some(),
+                    "missing superscript for '{chr}'"
                 );
             }
         }
-        for c in '0'..='9' {
-            assert!(super::superscript_char(c).is_some());
+        for chr in '0'..='9' {
+            assert!(super::superscript_char(chr).is_some());
         }
-        for c in ['+', '-', '=', '(', ')'] {
-            assert!(super::superscript_char(c).is_some());
+        for chr in ['+', '-', '=', '(', ')'] {
+            assert!(super::superscript_char(chr).is_some());
         }
         assert!(super::superscript_char(' ').is_some());
         assert!(super::superscript_char('!').is_none());
@@ -890,19 +677,19 @@ mod tests {
 
     #[test]
     fn subscript_mappings() {
-        for c in [
+        for chr in [
             'a', 'e', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'r', 's', 't', 'u', 'v', 'x',
         ] {
             assert!(
-                super::subscript_char(c).is_some(),
-                "missing subscript for '{c}'"
+                super::subscript_char(chr).is_some(),
+                "missing subscript for '{chr}'"
             );
         }
-        for c in '0'..='9' {
-            assert!(super::subscript_char(c).is_some());
+        for chr in '0'..='9' {
+            assert!(super::subscript_char(chr).is_some());
         }
-        for c in ['+', '-', '=', '(', ')'] {
-            assert!(super::subscript_char(c).is_some());
+        for chr in ['+', '-', '=', '(', ')'] {
+            assert!(super::subscript_char(chr).is_some());
         }
         assert!(super::subscript_char(' ').is_some());
         assert!(super::subscript_char('z').is_none());

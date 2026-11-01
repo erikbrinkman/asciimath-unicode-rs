@@ -1,4 +1,6 @@
-#![allow(missing_docs, clippy::must_use_candidate)]
+//! What both layouts ask of the parsed math
+
+use super::tokens::bracket_str;
 
 use asciimath_parser::tree::{
     Expression, Frac, Func, Group, Intermediate, Script, ScriptFunc, Simple, SimpleScript, Symbol,
@@ -35,19 +37,14 @@ fn vulgar_frac_char(num: &str, den: &str) -> Option<char> {
 }
 
 /// The contents of a group whose brackets only group
-pub fn paren_contents<'s, 'a>(simple: &'s Simple<'a>) -> Option<&'s Expression<'a>> {
+pub(crate) fn paren_contents<'s, 'a>(simple: &'s Simple<'a>) -> Option<&'s Expression<'a>> {
     match simple {
         Simple::Group(Group {
             left_bracket,
             expr,
             right_bracket,
-        }) if matches!(
-            *left_bracket,
-            "(" | "left(" | "[" | "left[" | "{" | "{:" | ""
-        ) && matches!(
-            *right_bracket,
-            ")" | "right)" | "]" | "right]" | "}" | ":}" | ""
-        ) =>
+        }) if matches!(bracket_str(left_bracket), "(" | "[" | "{" | "")
+            && matches!(bracket_str(right_bracket), ")" | "]" | "}" | "") =>
         {
             Some(expr)
         }
@@ -56,7 +53,7 @@ pub fn paren_contents<'s, 'a>(simple: &'s Simple<'a>) -> Option<&'s Expression<'
 }
 
 /// Whether a group was opened with nothing in it yet and its brackets only group
-pub fn is_empty_grouping(simple: &Simple<'_>) -> bool {
+pub(crate) fn is_empty_grouping(simple: &Simple<'_>) -> bool {
     match simple {
         Simple::Group(Group { left_bracket, .. }) if !left_bracket.is_empty() => {
             paren_contents(simple).is_some_and(|expr| expr.is_empty())
@@ -76,14 +73,8 @@ pub(crate) fn delimiters(op: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// Whether a function name was written with no argument after it; a name like `f` or `sin` reads
-/// fine alone, so it gets no placeholder
-pub fn name_without_argument(arg: &Simple<'_>) -> bool {
-    matches!(arg, Simple::Missing)
-}
-
 /// The lone unscripted simple an expression consists of, if any
-pub fn single_simple<'s, 'a>(expr: &'s Expression<'a>) -> Option<&'s Simple<'a>> {
+pub(crate) fn single_simple<'s, 'a>(expr: &'s Expression<'a>) -> Option<&'s Simple<'a>> {
     if let [
         Intermediate::ScriptFunc(ScriptFunc::Simple(SimpleScript {
             simple,
@@ -97,7 +88,8 @@ pub fn single_simple<'s, 'a>(expr: &'s Expression<'a>) -> Option<&'s Simple<'a>>
     }
 }
 
-pub fn unwrap_parens<'s, 'a>(simple: &'s Simple<'a>) -> &'s Simple<'a> {
+/// `simple` without brackets that only group a lone simple
+pub(crate) fn unwrap_parens<'s, 'a>(simple: &'s Simple<'a>) -> &'s Simple<'a> {
     paren_contents(simple)
         .and_then(single_simple)
         .unwrap_or(simple)
@@ -112,7 +104,7 @@ fn simple_str<'a>(simple: &Simple<'a>) -> Option<&'a str> {
 
 /// The vulgar fraction char for `numer` over `denom`, dropping brackets that only group if
 /// `strip`, when `unstyled` holds for the text of both
-pub fn extract_vulgar_frac(
+pub(crate) fn extract_vulgar_frac(
     numer: &Simple<'_>,
     denom: &Simple<'_>,
     strip: bool,
@@ -131,8 +123,9 @@ pub fn extract_vulgar_frac(
     }
 }
 
+/// Whether `sym` is an operator or relation that can get a space on either side
 #[allow(clippy::too_many_lines)]
-pub fn is_spaced_operator(sym: &str) -> bool {
+pub(crate) fn is_spaced_operator(sym: &str) -> bool {
     matches!(
         sym,
         "+" | "-"
@@ -348,6 +341,7 @@ fn simple_edges(simple: &Simple<'_>, script: &Script<'_>) -> (Edge, Edge) {
     }
 }
 
+/// The outer edges of a scripted item or applied function
 pub(crate) fn scriptfunc_edges(func: &ScriptFunc<'_>) -> (Edge, Edge) {
     match func {
         ScriptFunc::Simple(SimpleScript { simple, script }) => simple_edges(simple, script),
@@ -379,13 +373,79 @@ pub(crate) fn frac_edges(frac: &Frac<'_>) -> (Edge, Edge) {
 
 /// Whether the edges where two adjacent items of an expression meet need a space between them so
 /// words stay legible
-pub fn needs_space(prev: Edge, next: Edge) -> bool {
+fn needs_space(prev: Edge, next: Edge) -> bool {
     match (prev, next) {
         (Edge::Operator, _) | (_, Edge::Operator) => false,
         (Edge::Word | Edge::Scripted, _) | (_, Edge::Word) => true,
         (Edge::Applied, next) => next != Edge::Bracket,
         _ => false,
     }
+}
+
+/// What separates an item of an expression from the one before it
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Separator<'t> {
+    /// the whitespace typed between them
+    Typed(&'t str),
+    /// one space
+    Space,
+    /// nothing
+    Nothing,
+}
+
+/// What separates an item from the one before it: the whitespace typed between them if any was
+/// kept, and otherwise a space where either is an operator getting spaces or the words need one
+fn separator(
+    typed: &str,
+    prev_edge: Edge,
+    prev_spaced_op: bool,
+    next_edge: Edge,
+    next_spaced_op: bool,
+) -> Separator<'_> {
+    if !typed.is_empty() {
+        Separator::Typed(typed)
+    } else if prev_spaced_op || next_spaced_op || needs_space(prev_edge, next_edge) {
+        Separator::Space
+    } else {
+        Separator::Nothing
+    }
+}
+
+/// Each item of `expr` that renders to something, as `render` renders it after what separates it
+/// from the item before; `render` gives `None` for an item that renders to nothing, like an empty
+/// group, so it leaves no space behind
+pub(crate) fn separated_items<'e, 'a, T>(
+    expr: &'e Expression<'a>,
+    keep_spaces: bool,
+    spaced_operators: bool,
+    mut render: impl FnMut(&'e Intermediate<'a>, Separator<'_>) -> Option<T> + 'e,
+) -> impl Iterator<Item = T> + 'e {
+    // the runs typed on both sides of an item that renders to nothing both belong in the output
+    let mut typed = String::new();
+    let mut prev: Option<(Edge, bool)> = None;
+    expr.iter().filter_map(move |inter| {
+        let (leading_edge, trailing_edge) = match inter {
+            Intermediate::Space(space) => {
+                if keep_spaces {
+                    typed.push_str(space);
+                }
+                return None;
+            }
+            Intermediate::ScriptFunc(func) => scriptfunc_edges(func),
+            Intermediate::Frac(frac) => frac_edges(frac),
+        };
+        let spaced_op = spaced_operators && inter_is_spaced_op(inter);
+        let sep = match prev {
+            Some((prev_edge, prev_spaced_op)) => {
+                separator(&typed, prev_edge, prev_spaced_op, leading_edge, spaced_op)
+            }
+            None => Separator::Nothing,
+        };
+        let item = render(inter, sep)?;
+        typed.clear();
+        prev = Some((trailing_edge, spaced_op));
+        Some(item)
+    })
 }
 
 /// Whether an item is an operator that gets a space on either side of it
@@ -404,7 +464,7 @@ pub(crate) fn inter_is_spaced_op(inter: &Intermediate<'_>) -> bool {
 }
 
 /// Whether a function name is written directly against its argument, as in `f(x)` or `f'`
-pub fn hugs_argument(arg: &Simple<'_>) -> bool {
+fn hugs_argument(arg: &Simple<'_>) -> bool {
     matches!(
         arg,
         Simple::Missing
@@ -417,9 +477,46 @@ pub fn hugs_argument(arg: &Simple<'_>) -> bool {
     )
 }
 
-pub fn func_hugs_argument(func: &Func<'_>) -> bool {
-    match func.arg() {
-        ScriptFunc::Simple(SimpleScript { simple, .. }) => hugs_argument(simple),
-        ScriptFunc::Func(_) | ScriptFunc::Signed(_) => false,
+/// How a function name meets the argument after it
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArgGap {
+    /// no argument was written; a name like `f` or `sin` reads fine alone, so nothing follows it,
+    /// not even a placeholder
+    Bare,
+    /// the argument touches the name
+    Hugs,
+    /// a space separates them
+    Spaced,
+}
+
+impl ArgGap {
+    /// How a name meets `arg`
+    pub(crate) fn of_simple(arg: &Simple<'_>) -> Self {
+        if matches!(arg, Simple::Missing) {
+            ArgGap::Bare
+        } else if hugs_argument(arg) {
+            ArgGap::Hugs
+        } else {
+            ArgGap::Spaced
+        }
+    }
+
+    /// How the name of `func` meets its argument
+    pub(crate) fn of_func(func: &Func<'_>) -> Self {
+        match func.arg() {
+            ScriptFunc::Simple(SimpleScript {
+                simple: Simple::Missing,
+                script: Script::None,
+            }) => ArgGap::Bare,
+            ScriptFunc::Simple(SimpleScript { simple, .. }) if hugs_argument(simple) => {
+                ArgGap::Hugs
+            }
+            _ => ArgGap::Spaced,
+        }
+    }
+
+    /// Whether a space goes between the name and an argument, which renders to nothing if `empty`
+    pub(crate) fn spaced(self, empty: bool) -> bool {
+        self == ArgGap::Spaced && !empty
     }
 }
