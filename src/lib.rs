@@ -8,6 +8,9 @@ mod inline;
 mod tokens;
 
 use asciimath_parser::tree::Expression;
+pub use asciimath_parser::{
+    ASCIIMATH_TOKENS, SymbolClass, Token, TokenSpelling, asciimath_spellings,
+};
 use inline::Mapper;
 use std::fmt;
 

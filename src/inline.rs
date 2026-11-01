@@ -442,13 +442,13 @@ pub(crate) fn column_rules(matrix: &Matrix<'_>) -> Vec<usize> {
 /// The styles of the font command `op`, outermost first, if it is one
 pub(crate) fn font_styles(op: &str) -> Option<&'static [Style]> {
     match op {
-        "bb" | "mathbf" | "bold" => Some(&[Style::Bold]),
+        "bb" | "mathbf" => Some(&[Style::Bold]),
         "bbb" | "mathbb" => Some(&[Style::Double]),
         "cc" | "mathcal" => Some(&[Style::Cal]),
         "tt" | "mathtt" => Some(&[Style::Mono]),
         "fr" | "mathfrak" => Some(&[Style::Frak]),
         "sf" | "mathsf" => Some(&[Style::Sans]),
-        "it" | "mathit" | "italic" => Some(&[Style::Italic]),
+        "it" | "mathit" => Some(&[Style::Italic]),
         "bbit" => Some(&[Style::Bold, Style::Italic]),
         "bbsf" => Some(&[Style::Bold, Style::Sans]),
         "sfit" => Some(&[Style::Italic, Style::Sans]),
@@ -1358,6 +1358,16 @@ mod tests {
 
     #[test]
     #[allow(clippy::unicode_not_nfc)]
+    fn a_typed_glyph_of_several_characters_stays_whole() {
+        let plain = Conf::default().with_layout(Layout::InlinePlain);
+        for inp in ["🇺🇸/2", "👋🏿/2", "e\u{301}/2"] {
+            assert_eq!(render(inp), inp);
+            assert_eq!(plain.parse(inp).to_string(), inp);
+        }
+    }
+
+    #[test]
+    #[allow(clippy::unicode_not_nfc)]
     fn unary() {
         assert_eq!(render("sqrt x"), "√x");
         assert_eq!(render("bbb E"), "𝔼");
@@ -1711,6 +1721,7 @@ mod tests {
         );
         assert_eq!(render("ul :heart:"), "ul ❤\u{fe0f}");
         assert_eq!(render("cancel :us:"), "cancel 🇺🇸");
+        assert_eq!(render("cancel 🇺🇸"), "cancel 🇺🇸");
         assert_eq!(
             render("cancel :england:"),
             "cancel 🏴\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}"
@@ -1743,6 +1754,9 @@ mod tests {
         assert_eq!(render("bar :us:"), "bar 🇺🇸");
         assert_eq!(render("overset(a) :us:"), "🇺🇸ᵃ");
         assert_eq!(render("hat( :us: x)"), "hat (🇺🇸x)");
+        assert_eq!(render("hat ❤\u{fe0f}"), "hat ❤\u{fe0f}");
+        let block = Conf::default().with_layout(Layout::Block);
+        assert_eq!(block.parse("hat ❤\u{fe0f}").to_string(), "hat ❤\u{fe0f}");
     }
 
     #[test]
@@ -2059,8 +2073,6 @@ mod tests {
 
     #[test]
     fn added_fonts() {
-        assert_eq!(render("italic(x)"), "𝑥");
-        assert_eq!(render("bold(x)"), "𝐱");
         assert_eq!(render("bbit(x)"), "𝒙");
         assert_eq!(render("bbsf(x)"), "𝘅");
         assert_eq!(render("sfit(x)"), "𝘹");

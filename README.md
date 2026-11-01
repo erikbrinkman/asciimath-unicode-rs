@@ -55,6 +55,16 @@ let res = conf.parse("x/y").to_string();
 assert_eq!(res, "x\n─\ny");
 ```
 
+Every spelling in [`ASCIIMATH_TOKENS`] is accepted, along with the Unicode forms listed there (all
+in [`asciimath_spellings`]), plus any emoji shortcode `:name:` from the
+[`emojis`](https://docs.rs/emojis) crate:
+
+```rust
+use asciimath_unicode::ASCIIMATH_TOKENS;
+let alpha = ASCIIMATH_TOKENS.iter().find(|entry| entry.spelling == "alpha");
+assert_eq!(alpha.unwrap().unicode, Some("α"));
+```
+
 ## Configuration
 
 `Conf` starts from `default()`; set fields directly or with the matching
@@ -155,3 +165,5 @@ assert_eq!(kept.parse("a  +b").to_string(), "a  + b");
 [`Display`]: https://doc.rust-lang.org/std/fmt/trait.Display.html
 [`Conf`]: https://docs.rs/asciimath-unicode/latest/asciimath_unicode/struct.Conf.html
 [`parse`]: https://docs.rs/asciimath-unicode/latest/asciimath_unicode/struct.Conf.html#method.parse
+[`ASCIIMATH_TOKENS`]: https://docs.rs/asciimath-unicode/latest/asciimath_unicode/static.ASCIIMATH_TOKENS.html
+[`asciimath_spellings`]: https://docs.rs/asciimath-unicode/latest/asciimath_unicode/fn.asciimath_spellings.html
