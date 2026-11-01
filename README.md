@@ -130,10 +130,10 @@ like `+`, `=`, `xx` or `in`; with it off they are written against their operands
 about the spaces that keep words and function names legible, as in `sin x` or `a and b`, which are
 written either way, and a sign on the part after it is still written against that part.
 Whitespace typed with `keep_spaces` on wins where it was typed, and where none was typed this
-decides.  Such a space steps one width narrower when it lands in a script, and a fixed-width font
-draws it no narrower than a full cell, so `Block` leaves these spaces out inside a raised or lowered
-script rather than show it as padded as full-size math.  The spaces a script gets for any other
-reason are written there either way:
+decides.  Such a space would step one width narrower in a script, and a fixed-width font draws
+it no narrower than a full cell, so these spaces are left out inside a raised or lowered script
+rather than show it as padded as full-size math.  The spaces a script gets for any other reason
+are written there either way:
 
 ```rust
 use asciimath_unicode::{Conf, Layout};
@@ -141,10 +141,10 @@ let conf = Conf::default().with_spaced_operators(true);
 assert_eq!(conf.parse("a+b=c").to_string(), "a + b = c");
 assert_eq!(conf.parse("1 - - x").to_string(), "1 - -x");
 assert_eq!(conf.with_spaced_operators(false).parse("sinx+1").to_string(), "sin x+1");
-assert_eq!(conf.parse("x^(a+b)").to_string(), "xᵃ\u{2009}⁺\u{2009}ᵇ");
+assert_eq!(conf.parse("x^(a+b)").to_string(), "xᵃ⁺ᵇ");
+assert_eq!(conf.parse("x^sin x").to_string(), "xˢⁱⁿ\u{2009}ˣ");
 let block = conf.with_layout(Layout::Block);
 assert_eq!(block.parse("x^(a+b)").to_string(), "xᵃ⁺ᵇ");
-assert_eq!(block.parse("x^sin x").to_string(), "xˢⁱⁿ\u{2009}ˣ");
 
 let kept = conf.with_keep_spaces(true);
 assert_eq!(kept.parse("a  +b").to_string(), "a  + b");

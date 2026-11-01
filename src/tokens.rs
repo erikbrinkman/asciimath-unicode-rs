@@ -27,7 +27,7 @@ macro_rules! tokens {
 }
 
 /// Every token by name, with its unicode form
-static UNICODE_TOKENS: [(&str, Token, &str); 430] = {
+static UNICODE_TOKENS: [(&str, Token, &str); 432] = {
     use SymbolClass::{Glyph, Joining, JoiningName, Leading, LeadingName, Name, Space};
     use Token::{
         Binary, CloseBracket, Frac, Function, OpenBracket, OpenCloseBracket, Sep, Sign, Sub, Super,
@@ -39,7 +39,7 @@ static UNICODE_TOKENS: [(&str, Token, &str); 430] = {
         Super => "^";
         Sub => "_";
         Sep => ",";
-        Sign => "+", "-", "+-" => "±", "pm" => "±", "-+" => "∓", "mp" => "∓";
+        Sign => "+", "-", "+-" => "±", "pm" => "±", "±", "-+" => "∓", "mp" => "∓", "∓";
         Function => "sin", "cos", "tan", "sinh", "cosh", "tanh", "cot", "sec", "csc", "arcsin",
             "arccos", "arctan", "coth", "sech", "csch", "exp", "log", "ln", "det", "gcd", "lcm",
             "Sin", "Cos", "Tan", "Arcsin", "Arccos", "Arctan", "Sinh", "Cosh", "Tanh", "Cot", "Sec",
@@ -153,6 +153,22 @@ static UNICODE_STRS: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| {
         .map(|&(name, _, unicode)| (name, unicode))
         .collect()
 });
+
+/// The class of each symbol by its unicode form, for characters typed in that form
+static UNICODE_CLASSES: LazyLock<HashMap<&str, SymbolClass>> = LazyLock::new(|| {
+    UNICODE_TOKENS
+        .iter()
+        .filter_map(|&(_, tok, unicode)| match tok {
+            Token::Symbol(class) => Some((unicode, class)),
+            _ => None,
+        })
+        .collect()
+});
+
+/// The class of the symbol whose unicode form is `raw`, if any symbol has it
+pub(crate) fn raw_class(raw: &str) -> Option<SymbolClass> {
+    UNICODE_CLASSES.get(raw).copied()
+}
 
 /// The unicode form of a symbol, or of an emoji shortcode in the given skin tone
 pub(crate) fn symbol_str(inp: &str, skin_tone: SkinTone) -> &str {
@@ -545,15 +561,15 @@ pub(crate) fn parse(inp: &str, keep_spaces: bool) -> Expression<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SkinTone, Token, UNICODE_TOKENS};
+    use super::{SkinTone, SymbolClass, Token, UNICODE_TOKENS};
     use std::collections::{HashMap, HashSet};
 
     #[test]
     fn mapping() {
         // the tokens whose unicode form is the token itself
-        const WRITTEN_AS_TYPED: [&str; 20] = [
-            "/", "^", "_", ",", "+", "-", "=", ":=", "<", ">", "!", "%", "(", "[", "{", ")", "]",
-            "}", "|", "||",
+        const WRITTEN_AS_TYPED: [&str; 22] = [
+            "/", "^", "_", ",", "+", "-", "±", "∓", "=", ":=", "<", ">", "!", "%", "(", "[", "{",
+            ")", "]", "}", "|", "||",
         ];
         for &(string, tok, unicode) in &UNICODE_TOKENS {
             match tok {
@@ -595,6 +611,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn unicode_forms_have_one_class() {
+        let mut classes: HashMap<&str, (&str, SymbolClass)> = HashMap::new();
+        for &(string, tok, unicode) in &UNICODE_TOKENS {
+            let Token::Symbol(class) = tok else { continue };
+            let &mut (other, other_class) = classes.entry(unicode).or_insert((string, class));
+            assert_eq!(
+                class, other_class,
+                "{string:?} and {other:?} both render as {unicode:?} but differ in class"
+            );
+        }
+        assert_eq!(super::raw_class("⊂"), Some(SymbolClass::Joining));
+        assert_eq!(super::raw_class("∀"), Some(SymbolClass::Leading));
+        assert_eq!(super::raw_class("≠≤"), None);
     }
 
     #[test]
