@@ -99,13 +99,25 @@ fn simple_str<'a>(simple: &Simple<'a>) -> Option<&'a str> {
     }
 }
 
-pub fn extract_vulgar_frac(numer: &Simple<'_>, denom: &Simple<'_>, strip: bool) -> Option<char> {
+/// The vulgar fraction char for `numer` over `denom`, dropping brackets that only group if
+/// `strip`, when `unstyled` holds for the text of both
+pub fn extract_vulgar_frac(
+    numer: &Simple<'_>,
+    denom: &Simple<'_>,
+    strip: bool,
+    unstyled: impl Fn(&str) -> bool,
+) -> Option<char> {
     let (num, den) = if strip {
         (unwrap_parens(numer), unwrap_parens(denom))
     } else {
         (numer, denom)
     };
-    vulgar_frac_char(simple_str(num)?, simple_str(den)?)
+    let (num, den) = (simple_str(num)?, simple_str(den)?);
+    if unstyled(num) && unstyled(den) {
+        vulgar_frac_char(num, den)
+    } else {
+        None
+    }
 }
 
 #[allow(clippy::too_many_lines)]
